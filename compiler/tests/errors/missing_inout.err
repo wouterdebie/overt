@@ -1,0 +1,1 @@
+missing_inout.ovt:7:8: error: `bump` changes this argument; mark it: `inout count`

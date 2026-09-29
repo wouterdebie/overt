@@ -1,0 +1,9 @@
+fn bump(n: inout int) {
+  n += 1
+}
+
+fn main() ! io {
+  var count = 0
+  bump(count)
+  print(count)
+}

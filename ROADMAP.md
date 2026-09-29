@@ -131,7 +131,7 @@ Milestone 4's service, with the todos stored in sqlite.
 **Needs**
 - `extern` blocks, and header import through libclang.
 - `blocking` calls, and resources with `drop`.
-- `ptr` in the standard library, and `c_str()`.
+- `ffi` in the standard library (C types and pointer operations), and `c_str()`.
 
 **Done when**
 - Milestone 4's tests pass unchanged.

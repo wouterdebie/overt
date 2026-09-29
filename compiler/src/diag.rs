@@ -9,11 +9,18 @@ use crate::source::{Source, Span};
 pub struct Diag {
     pub span: Span,
     pub msg: String,
+    /// Which file of the program the span is in.
+    pub file: usize,
 }
 
 impl Diag {
     pub fn new(span: Span, msg: impl Into<String>) -> Diag {
-        Diag { span, msg: msg.into() }
+        Diag { span, msg: msg.into(), file: 0 }
+    }
+
+    pub fn in_file(mut self, file: usize) -> Diag {
+        self.file = file;
+        self
     }
 
     pub fn render(&self, src: &Source) -> String {
@@ -40,12 +47,21 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 /// The closest candidate to `name`, if it is close enough to be a likely typo.
+/// A candidate that starts the name (`len` for `lenght`) counts as close.
 pub fn closest<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     let limit = (name.chars().count() / 3).max(1);
     candidates
         .into_iter()
-        .map(|c| (edit_distance(name, c), c))
-        .filter(|(d, _)| *d <= limit)
+        .filter_map(|c| {
+            let d = edit_distance(name, c);
+            if d <= limit {
+                Some((d, c))
+            } else if c.len() >= 3 && name.starts_with(c) {
+                Some((limit + 1, c))
+            } else {
+                None
+            }
+        })
         .min_by_key(|(d, _)| *d)
         .map(|(_, c)| c)
 }

@@ -1,0 +1,1 @@
+method_typo.ovt:3:11: error: `str` has no method `lenght`; did you mean `str.len(self) -> int`?

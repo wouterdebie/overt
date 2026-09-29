@@ -35,6 +35,10 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 | Maps keep insertion order | Deterministic test output and JSON | Unordered hash maps |
 | No user-defined interfaces in v0 | Spec budget; enums and structs of functions cover most server needs | Traits. Revisit if the benchmark needs them |
 | Traps stop the process in v0 | No unwinding in the first codegen | Per-task traps (open question) |
+| Names starting with `_` are private to their module | `Map`'s storage stays hidden, so `m.keys` (a field) and `m.keys()` (a method) can't clash | `pub` on public names (more tokens on every declaration) |
+| Standard library written in Overt, over a few intrinsics | `ovt outline` shows the real signatures and docs; `Map` and `Set` are plain generic code | Built-in collections in the compiler |
+| `pat => x += 1` accepted in `match` arms | A Rust habit that costs nothing to allow; `ovt fmt` adds the braces | An error |
+| Arguments that read a variable passed `inout` are copied | `xs.push(xs[0])` just works, and the spec needs one rule less | Rejecting any other use of the variable in the call |
 | Name "Overt" | States the principle; no existing language with a similar name whose habits would leak in | Cairn (one letter from Cairo, a real language) |
 
 ## Memory model
@@ -44,46 +48,54 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 | Kind | Layout |
 |---|---|
 | plain | inline, C layout (fields in declared order, C alignment) |
-| `str`, `[T]` | `{buf: *RcBuf, off: i64, len: i64}`, where `RcBuf` is a 16-byte header `{rc: i64, cap: i64}` followed by the data. As in Lean 4, `rc > 0` is a count owned by one task, `rc < 0` a shared count updated atomically, and `rc == 0` a static buffer that is never freed (string literals) |
-| `Map`, `Set` | pointer to a reference-counted, insertion-ordered table: a dense entry array plus a hash index, like Python's compact dict |
-| recursive field | pointer to a reference-counted box, inserted by the compiler when the type graph has a cycle |
-| enum | tag plus payload union. `?T` is tag plus `T`; niche optimization comes later |
-| closure | `{fn: ptr, env: *RcBox}`; captured values are copied into the environment |
-| resource | plain layout plus a drop function; move-only |
-| `Shared[T]`, `Atomic`, `Chan` | pointer to a box with an always-atomic count. `Shared` holds `{rc, lock, owner_task, T}` |
+| `str`, `[T]` | `{buf: ptr, off: i64, len: i64}`, a view of a buffer with a 24-byte header `{rc: i64, cap: i64, used: i64}` followed by the elements. `used` is how many elements the buffer holds, since a view may show fewer. As in Lean 4, `rc > 0` is a count owned by one task, `rc < 0` (planned) a shared count updated atomically, and `rc == 0` a static buffer that is never freed (string literals). The empty array is `{null, 0, 0}` |
+| `Map`, `Set` | plain Overt structs in `std/collections.ovt`: parallel arrays of keys, values and live flags, plus an open-addressing slot table of indexes, like Python's compact dict. They get copy-on-write from their arrays |
+| recursive field | a pointer to a box `{rc: i64, value}`, inserted by the compiler when a type contains itself without an array or other indirection in between |
+| enum | `i32` when no variant has fields; otherwise `{i32 tag, [N x i64] payload}`, with each variant's fields laid out as a struct in the payload |
+| `?T` | `{i1 some, T}`; niche optimization comes later |
+| closure | `{fn: ptr, env: ptr}`. The environment is `{rc: i64, drop: ptr, captures...}` holding copies of the captured values; `drop` frees it, so dropping a function value doesn't need its closure's type. Named functions used as values get a thunk and a null environment |
+| resource | planned (milestone 5): plain layout plus a drop function; move-only |
+| `Shared[T]`, `Atomic`, `Chan` | planned (milestone 2): a pointer to a box with an always-atomic count. `Shared` holds `{rc, lock, owner_task, T}` |
 
 ### Copy, move, drop
 
-- **Copying a heap-backed value** increments its count (`dup`). **Leaving scope** decrements it (`drop`), freeing at zero and dropping children. **A variable's last use** becomes a move with no count update.
-- **Mutating a heap-backed value** requires it to be unique. If `rc > 1`, the buffer is cloned first, as a shallow clone whose elements are `dup`ed. `push` works in place when the buffer is unique and has room.
-- **Slices** (`xs[a..b]`) are `{buf, off + a, b - a}` plus a `dup`. Writing to a slice makes it unique first, which copies only the slice's range. Known cost: a small slice keeps a large buffer alive.
-- **Resource drops** run at scope end in reverse declaration order. Moved-out variables aren't dropped (static drop flags).
-- **Later:** Perceus-style reuse analysis and drop specialization.
+- **Owned or borrowed.** Codegen evaluates every expression as either owned (the holder must drop it) or borrowed (valid while its owner lives). Copying a borrowed value into a place that keeps it (a variable, a field, a `sink` argument, a return) increments its counts (`dup`). Owned temporaries that are only read are dropped at the end of their statement.
+- **Cleanup stack.** Locals and temporaries that need dropping are registered on a stack of scopes. Leaving a scope normally drops its entries; `return`, failure, `break` and `continue` drop every scope they leave.
+- **Mutating a heap-backed value** requires its view to be the only one and to cover the whole buffer (`rc == 1`, `off == 0`, `len == used`); otherwise the viewed range is copied first, with its elements `dup`ed. `push` and `s += t` then work in place, growing the buffer by doubling.
+- **Slices** (`xs[a..b]`, `s[a..b]`) are `{buf, off + a, b - a}` plus a `dup`. Known cost: a small slice keeps a large buffer alive.
+- **Per-type helpers.** For each concrete type, codegen generates `dup`, `drop`, `eq`, `cmp`, `hash` and `show` functions that call the helpers of the type's components, so recursive types need no special handling.
+- **Not yet:** a variable's last use doesn't become a move, so values are copied (a count update) where a move would do. Perceus-style reuse analysis comes later.
+- **Resource drops** (milestone 5) run at scope end in reverse declaration order. Moved-out variables aren't dropped (static drop flags).
 
 ### Calling convention
 
-| Mode | Passed as | LLVM attributes | Count traffic |
-|---|---|---|---|
-| `x: T`, plain and 16 bytes or less | registers | | none |
-| `x: T`, otherwise | pointer to the caller's value | `noalias readonly nocapture nonnull` | none (a borrow); the callee `dup`s only what it keeps |
-| `x: inout T` | pointer | `noalias nonnull` | none |
-| `x: sink T` | by value, owned | | the caller moves or `dup`s; the callee must consume or drop |
-| return | registers if 16 bytes or less, else `sret` | | owned |
+| Mode | Passed as | Count traffic |
+|---|---|---|
+| `x: T` | the value (LLVM aggregates for structs), borrowed | none; the callee `dup`s only what it keeps |
+| `x: inout T` | a pointer to the caller's place | none |
+| `x: sink T` | the value, owned | the caller `dup`s; the callee drops it |
+| return | the value, owned | |
+| failable function | returns `{i1 failed, T, Err}` | the error's message is owned |
 
-`noalias` is sound because:
-- The exclusivity check guarantees an `inout` argument overlaps no other argument.
+Closures and function values take their environment pointer first. Runtime functions take only scalars and pointers, so the C calling convention for structs never matters.
+
+**Planned:** pass large read-only values by pointer with `noalias readonly nocapture nonnull`, and `inout` pointers with `noalias`. That is sound because:
+- An `inout` argument overlaps no other argument (see below).
 - There are no mutable globals.
 - A `Shared` value can only be mutated inside `lock`, and a task can't lock the same `Shared` twice. The runtime records the owner task and traps on re-entry.
 
-This is also the biggest single enabler for LLVM's auto-vectorizer.
+It's also the biggest single enabler for LLVM's auto-vectorizer.
 
-`inout xs[i]` first makes `xs`'s buffer unique (copy-on-write), then passes a pointer to the element. `inout m[k]` passes a pointer to the table slot. Exclusivity guarantees `xs` or `m` isn't touched during the call, so the buffer can't be reallocated.
+`inout xs[i]` first makes `xs`'s buffer unique (copy-on-write), then passes a pointer to the element. A map entry can't be passed `inout` or changed in place: the entries live in `Map`'s arrays, behind functions. The compiler rewrites `m[k] = v` and `m[k] += v` into calls to `set`, and rejects `m[k].field = v` with a message saying to copy the entry out and back.
 
 ### Exclusivity check
 
-The check is static and runs per call. An `inout` argument's access path (`p`, `p.x`, `xs[i]`) must not overlap any other argument's path:
-- Disjoint fields are fine: `f(inout p.x, p.y)`.
-- Two elements of the same array are rejected, because `i != j` can't be proven.
+The check is static and runs per call:
+- The same variable can't be passed as `inout` twice.
+- An argument that reads a variable another argument passes as `inout` is copied before the call, so `xs.push(xs[0])` works. The spec therefore needs only the first rule.
+- A variable being changed by `for inout` can't be used in the loop body.
+
+Disjoint fields (`f(inout p.x, inout p.y)`) are rejected for now, since any two `inout` arguments with the same root variable count as the same.
 
 ### Values that cross threads
 
@@ -99,7 +111,9 @@ Marking walks the reachable buffers once and stops at any buffer that's already 
 ## Effects and failure
 
 - Effects are checked by the type checker and erased in codegen.
-- A failable function lowers to a function returning a tagged `{T | Err}`, where `Err` is `{kind: u8, msg: str}`. `?` is a branch that returns the error. `else` and `catch` are branches to the handler.
+- A failable function returns `{i1 failed, T, Err}`, where `Err` is the prelude struct `{kind: ErrKind, msg: str}`. `?` is a branch that returns the error, dropping everything in scope. `else` and `catch` are branches to the handler.
+- A failing `main` prints `error: <msg>` and exits with status 1.
+- In an `ex` line, the outermost call on each side may fail without `?`; a failure fails the example.
 - Effect parameters (`!E`) are monomorphized per call site, like type parameters. Inside the generic body, calling an `E`-typed function passes failure on implicitly, since the body can't know whether `E` contains `fail`. After monomorphization with an `E` without `fail`, that branch disappears.
 - Standard higher-order functions (`map`, `filter`, `task.map`, ...) are declared with effect parameters.
 
@@ -152,23 +166,59 @@ The runtime is written in C as a static library, `libovtrt.a`, linked into every
 
 ## Compiler architecture
 
-The compiler is written in Rust. Its stages:
+The compiler (`compiler/`) is written in Rust with no dependencies. Its stages:
 
-1. **`lex`**
-2. **`parse`**: a lossless syntax tree with spans, which `fmt`, `put` and `outline` also use.
-3. **`resolve`**: modules, names, naming rules, shadowing.
-4. **`check`**:
-   - type inference inside bodies, generics, effects
-   - parameter modes, exclusivity, exhaustiveness, unused results
-5. **`lower`**: Overt IR, with explicit `dup`/`drop`/move, monomorphized, failure as branches.
-6. **`llvm`**: textual LLVM IR.
-7. **clang**: compiles the IR and links.
+1. **`lexer`**: tokens, with newlines that end statements; literals keep their source text.
+2. **`parser`**: a syntax tree with spans, which `fmt` and `outline` also use.
+3. **`check`**: all modules of the program and the standard library together.
+   - `mod.rs`: declarations, scopes, signatures, recursive types.
+   - `body.rs` and `call.rs`: bodies, with bidirectional checking and unification (`infer.rs`) inside each function. Closures are checked in their own frame and capture what they use from outside.
+   - `pat.rs`: patterns, and exhaustiveness with the usefulness algorithm, which also gives an example of a missing case.
+   - `zonk.rs`: resolves inferred types, defaults literals, checks `Eq`/`Ord`/`Hash` constraints.
+   - The result is the typed program (`tir.rs`), whose types may still contain generic parameters.
+4. **`codegen`**: textual LLVM IR. Each function is emitted once per set of type arguments, from a work queue, along with per-type helpers (`helpers.rs`), `match` (`pat.rs`) and intrinsics (`intrin.rs`).
+5. **clang**: compiles the IR together with the runtime (`runtime/rt.c`, embedded in `ovt`).
 
-Every diagnostic has a code, a span, a one-line message and an optional fix (a text edit); `--json` gives machine output. `outline`, `put`, `q`, `fmt` and `test` run on the same front end. The compiler's own tests are `.ovt` programs with expected output or expected errors (golden files).
+Diagnostics are one line each, with the fix in the message when one is known. Planned: `--json` output, and `ovt put` and `ovt q` on the same front end.
+
+The compiler's tests (`cargo test`) are golden files:
+- programs with their expected output, traps and exit status (`tests/run/`)
+- programs with their expected errors (`tests/errors/`)
+- outlines (`tests/outline/`)
+- the `ovt` code blocks in SPEC.md, which must parse and be canonical
+- the standard library's `ex` lines (`ovt test --std`)
+- reference versions of the task programs (`tests/programs/`), which must pass the tasks' tests
+
+Set `OVT_CFLAGS="-fsanitize=address -g"` to build any program with AddressSanitizer.
+
+## Standard library
+
+The standard library (`std/`) is written in Overt, and embedded in `ovt`. Functions declared without a body are intrinsics, implemented in `codegen/intrin.rs` over the runtime. Files like `str.ovt` and `collections.ovt` declare methods and types visible everywhere; `os.ovt`, `fs.ovt`, `math.ovt` and `log.ovt` are modules. `ovt outline <name>` shows a file's declarations and docs, and hides private (`_`) names. The same outlines are what agents read, so the docs in std/ are part of the language's interface.
 
 ## Build order
 
 The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone lists the compiler, runtime and standard library work it needs.
+
+## Benchmark findings
+
+### Pilot: `wordfreq` in Overt, one run (milestone 1)
+
+- **Result:** 19 of 19 tests, 0.21 s on 100 MB. 31 builds (8 failed), 68 turns, 18 minutes, 86k output tokens, $4.07.
+- **Where the effort went:** the agent's first version, using `Map` the obvious way, took about 1.3 s. Because the prompt says speed matters, it spent most of the run replacing `Map` with its own hash table over a byte arena, and trying `task`, `par` and `[T; N]`, which weren't implemented.
+- **Lesson:** the speed of the obvious code decides how many tokens agents spend. Overt's obvious code has to be fast, or agents will hand-optimize. Fixed since:
+  - an inline fast path for `push` and array writes
+  - a larger first allocation for small elements
+  - an inline fast path for dropping shared buffers
+  - `to_lower`/`to_upper` share the string when nothing changes
+
+  That brought the first version from 1.33 s to 1.0 s. Still open: the counting idiom `m[k] = (m.get(k) else 0) + 1` looks the key up twice.
+- **Stumbles and fixes:**
+  - `c` was reserved as a module name (for C types), clashing with a common variable name. C types and pointer operations moved to `ffi`.
+  - `int.parse(s) else none` in a function returning `?int` was an error. Now the result is optional when an optional is expected, for `else` and `catch`.
+  - A real error was followed by "can't tell the type of this value". That message is now left out when the function already has an error.
+  - `ovt build --help` said "no such file or directory". `--help` now prints the usage.
+  - `ovt outline task` said there's no such module. It now says the module is planned for milestone 2.
+  - The named-argument rule cost one round (`ranks_before(a, b)`, both `WordCount`). It's working as intended: that is exactly the swap it exists to catch.
 
 ## Open questions
 
@@ -182,6 +232,9 @@ The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone l
 - Default stack reservation, and memory per idle connection with 16 KiB pages.
 - Small slices keeping large buffers alive.
 - Effect parameters on closures stored in structs.
+- Changing a map entry in place (`m[k].count += 1`, `m[k].push(x)`): today it takes a copy out and a store back.
+- Moves on last use, so values aren't copied where they're used for the last time.
+- One lookup for `m[k] = (m.get(k) else 0) + 1`, the most common map idiom, which today hashes and probes twice.
 - Unchecked arithmetic for hot loops, if overflow checks block vectorization in practice.
 - Callbacks from C.
 - Linux: epoll or io_uring, and an x86_64 context switch.
@@ -192,4 +245,4 @@ The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone l
 uvx --with tiktoken python -c "import tiktoken; e = tiktoken.get_encoding('o200k_base'); print(len(e.encode(open('SPEC.md').read())))"
 ```
 
-`o200k_base` is a proxy, since Claude's tokenizer isn't available offline. Treat the number as relative: SPEC.md must stay under 5,000 by this measure. At v0 it's about 4,900.
+`o200k_base` is a proxy, since Claude's tokenizer isn't available offline. Treat the number as relative: SPEC.md must stay under 5,000 by this measure. After milestone 1 it's about 4,900.

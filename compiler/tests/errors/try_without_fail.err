@@ -1,0 +1,1 @@
+try_without_fail.ovt:2:11: error: `int.parse` has the `fail` effect, so `main` must declare it too: add `! fail` to its signature

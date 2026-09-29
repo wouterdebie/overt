@@ -1,0 +1,221 @@
+// Hash maps and sets. Both keep insertion order and are copied cheaply, like arrays.
+//
+// Map literals: `{"a": 1, "b": 2}`, and `{}` where the type is known. `m[k]`
+// traps if `k` is missing, and `m.get(k)` returns `none` instead. `m[k] = v`
+// adds or replaces. `for k, v in m` visits entries in insertion order.
+// Set literals: `{1, 2}`. `for x in s` visits elements in insertion order.
+
+type Map[K: Eq + Hash, V] {
+  _keys: [K]
+  _vals: [V]
+  _live: [bool]
+  // -1 for an empty slot, otherwise an index into `_keys`.
+  _slots: [int]
+  _count: int
+}
+
+fn Map[K, V].new() -> Map[K, V] {
+  return Map(_keys: [], _vals: [], _live: [], _slots: [], _count: 0)
+}
+
+fn Map[K, V].len(self) -> int {
+  return self._count
+}
+
+fn Map[K, V].is_empty(self) -> bool {
+  return self._count == 0
+}
+
+// The value for `k`, or `none`.
+fn Map[K, V].get(self, k: K) -> ?V
+  ex {"a": 1}.get("a") == 1
+  ex {"a": 1}.get("b") == none
+{
+  let e = self._find(k)
+  if e < 0 {
+    return none
+  }
+  return self._vals[e]
+}
+
+fn Map[K, V].contains(self, k: K) -> bool {
+  return self._find(k) >= 0
+}
+
+// Adds `k` with value `v`, or replaces the value if `k` is already there.
+fn Map[K, V].set(inout self, k: sink K, v: sink V) {
+  let e = self._find(k)
+  if e >= 0 {
+    self._vals[e] = v
+    return
+  }
+  if (self._keys.len() + 1) * 4 > self._slots.len() * 3 {
+    self._rebuild(self._count + 1)
+  }
+  let mask = self._slots.len() - 1
+  var s = int(hash(k) & u64(mask))
+  while self._slots[s] != -1 {
+    s = (s + 1) & mask
+  }
+  self._slots[s] = self._keys.len()
+  self._keys.push(k)
+  self._vals.push(v)
+  self._live.push(true)
+  self._count += 1
+}
+
+// Removes `k` and returns its value, or `none` if it wasn't there.
+fn Map[K, V].remove(inout self, k: K) -> ?V {
+  let e = self._find(k)
+  if e < 0 {
+    return none
+  }
+  self._live[e] = false
+  self._count -= 1
+  return self._vals[e]
+}
+
+// The keys in insertion order.
+fn Map[K, V].keys(self) -> [K] {
+  var out: [K] = []
+  for i, k in self._keys {
+    if self._live[i] {
+      out.push(k)
+    }
+  }
+  return out
+}
+
+// The values in insertion order.
+fn Map[K, V].values(self) -> [V] {
+  var out: [V] = []
+  for i, v in self._vals {
+    if self._live[i] {
+      out.push(v)
+    }
+  }
+  return out
+}
+
+// The entries in insertion order.
+fn Map[K, V].pairs(self) -> [(K, V)] {
+  var out: [(K, V)] = []
+  for i, k in self._keys {
+    if self._live[i] {
+      out.push((k, self._vals[i]))
+    }
+  }
+  return out
+}
+
+// The index of `k` in `_keys`, or -1.
+fn Map[K, V]._find(self, k: K) -> int {
+  if self._slots.len() == 0 {
+    return -1
+  }
+  let mask = self._slots.len() - 1
+  var s = int(hash(k) & u64(mask))
+  while true {
+    let e = self._slots[s]
+    if e == -1 {
+      return -1
+    }
+    if self._live[e] && self._keys[e] == k {
+      return e
+    }
+    s = (s + 1) & mask
+  }
+}
+
+// Drops removed entries and resizes the slot table to fit `want` entries.
+fn Map[K, V]._rebuild(inout self, want: int) {
+  var keys: [K] = []
+  var vals: [V] = []
+  var live: [bool] = []
+  for i, k in self._keys {
+    if self._live[i] {
+      keys.push(k)
+      vals.push(self._vals[i])
+      live.push(true)
+    }
+  }
+  var size = 8
+  while size * 3 < want * 4 {
+    size *= 2
+  }
+  var slots: [int] = []
+  for _i in 0..size {
+    slots.push(-1)
+  }
+  let mask = size - 1
+  for i, k in keys {
+    var s = int(hash(k) & u64(mask))
+    while slots[s] != -1 {
+      s = (s + 1) & mask
+    }
+    slots[s] = i
+  }
+  self._keys = keys
+  self._vals = vals
+  self._live = live
+  self._slots = slots
+}
+
+// Whether both maps have the same entries, in any order.
+fn Map[K, V: Eq].equals(self, other: Map[K, V]) -> bool {
+  if self._count != other._count {
+    return false
+  }
+  for i, k in self._keys {
+    if self._live[i] {
+      let e = other._find(k)
+      if e < 0 || other._vals[e] != self._vals[i] {
+        return false
+      }
+    }
+  }
+  return true
+}
+
+type Set[T: Eq + Hash] { _m: Map[T, bool] }
+
+fn Set[T].new() -> Set[T] {
+  return Set(_m: Map.new())
+}
+
+fn Set[T].len(self) -> int {
+  return self._m.len()
+}
+
+fn Set[T].is_empty(self) -> bool {
+  return self._m.len() == 0
+}
+
+fn Set[T].contains(self, x: T) -> bool
+  ex {1, 2}.contains(2)
+{
+  return self._m.contains(x)
+}
+
+// Adds `x`; returns false if it was already there.
+fn Set[T].insert(inout self, x: sink T) -> bool {
+  if self._m.contains(x) {
+    return false
+  }
+  self._m.set(x, true)
+  return true
+}
+
+// Removes `x`; returns false if it wasn't there.
+fn Set[T].remove(inout self, x: T) -> bool {
+  return self._m.remove(x) != none
+}
+
+// The elements in insertion order.
+fn Set[T].items(self) -> [T] {
+  return self._m.keys()
+}
+
+fn Set[T].equals(self, other: Set[T]) -> bool {
+  return self._m.equals(other._m)
+}

@@ -1,0 +1,1 @@
+unhandled_fail.ovt:2:11: error: `int.parse` can fail; handle it with `?`, `else` or `catch`

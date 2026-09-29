@@ -7,6 +7,9 @@ mod fmt;
 mod lexer;
 mod parser;
 mod source;
+mod stdlib;
+mod tir;
+mod types;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

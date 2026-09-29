@@ -1,0 +1,4 @@
+fn main() ! io {
+  let s = "hello"
+  print(s.lenght())
+}

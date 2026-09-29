@@ -1,0 +1,14 @@
+// Files. Paths are strings.
+
+// The whole file. Fails with `.NotFound` if it doesn't exist, `.Denied` if it
+// can't be read, and `.Invalid` if it isn't UTF-8.
+fn read(path: str) -> str ! io, fail
+
+// The whole file, as bytes.
+fn read_bytes(path: str) -> [u8] ! io, fail
+
+// Writes `data` to the file, replacing what was there.
+fn write(path: str, data: str) ! io, fail
+
+// Whether a file or directory exists at `path`.
+fn exists(path: str) -> bool ! io

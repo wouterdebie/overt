@@ -1,0 +1,1 @@
+not_exhaustive.ovt:8:10: error: this `match` doesn't handle `.Yellow`; add an arm for it, or `_ => ...`

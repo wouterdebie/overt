@@ -1,7 +1,9 @@
 //! Golden tests.
 //!
 //! - `tests/run/x.ovt` runs and must print `x.out`. If `x.stderr` exists, the
-//!   program must trap (exit status 101) with exactly that message.
+//!   program must trap (exit status 101) with exactly that message; `x.status`
+//!   overrides the expected exit status.
+//! - `tests/programs/<name>` builds and must pass `tasks/*-<name>/tests/run.py`.
 //! - `tests/errors/x.ovt` must fail to build with exactly the messages in `x.err`.
 //! - Every test program, and every `ovt` code block in SPEC.md, must come back
 //!   unchanged from `ovt fmt`.
@@ -54,7 +56,10 @@ fn programs_print_expected_output() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stderr_file = f.with_extension("stderr");
-        let (want_err, want_code) = if stderr_file.exists() { (read(&stderr_file), 101) } else { (String::new(), 0) };
+        let (want_err, mut want_code) = if stderr_file.exists() { (read(&stderr_file), 101) } else { (String::new(), 0) };
+        if let Ok(code) = read(&f.with_extension("status")).trim().parse::<i32>() {
+            want_code = code;
+        }
         let want_out = read(&f.with_extension("out"));
         let code = out.status.code().unwrap_or(-1);
         if stdout != want_out || stderr != want_err || code != want_code {
@@ -135,4 +140,39 @@ fn spec_code_blocks_are_canonical() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+fn reference_programs_pass_task_tests() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut failures = Vec::new();
+    for (name, task) in [("wordfreq", "01-wordfreq"), ("jsonfmt", "01-jsonfmt")] {
+        let dir = root.join("tests/programs").join(name);
+        let bin = dir.join("bin").join(name);
+        let out = ovt().current_dir(&dir).args(["build", "-o"]).arg(&bin).output().unwrap();
+        if !out.status.success() {
+            failures.push(format!("{name} doesn't build:\n{}", String::from_utf8_lossy(&out.stderr)));
+            continue;
+        }
+        let task_dir = root.join("..").join("tasks").join(task);
+        let out = Command::new("python3").current_dir(&task_dir).arg("tests/run.py").arg(&bin).output().unwrap();
+        if !out.status.success() {
+            failures.push(format!("{name}:\n{}", String::from_utf8_lossy(&out.stdout)));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+fn std_examples_pass() {
+    let out = ovt().args(["test", "--std"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && stdout.contains("tests passed"), "\n{stdout}{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn std_and_reference_programs_are_formatted() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = ovt().arg("fmt").arg("--check").arg(root.join("../std")).arg(root.join("tests/programs")).output().unwrap();
+    assert!(out.status.success(), "\n{}", String::from_utf8_lossy(&out.stderr));
 }

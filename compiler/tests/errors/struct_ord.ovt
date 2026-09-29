@@ -1,0 +1,7 @@
+type Card { rank: int }
+
+fn main() ! io {
+  var cards = [Card(rank: 2), Card(rank: 1)]
+  cards.sort()
+  print(cards)
+}

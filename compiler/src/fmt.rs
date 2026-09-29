@@ -27,10 +27,21 @@ pub fn format(src: &Source, file: &File, comments: &[Comment]) -> String {
 }
 
 /// Declarations without bodies: signatures, docs, `pre` and `ex` lines.
-pub fn outline(src: &Source, file: &File, comments: &[Comment]) -> String {
+/// `module` names the module when its functions are called as `module.name(...)`.
+pub fn outline(src: &Source, file: &File, comments: &[Comment], module: Option<&str>) -> String {
     let mut out = String::new();
+    if let Some(m) = module {
+        out.push_str(&format!("// module `{m}`: call its functions as `{m}.name(...)`\n"));
+    }
+    // The file's own introduction: comments before the first declaration's docs.
+    let first = file.items.first().map(|i| i.span.lo).unwrap_or(u32::MAX);
+    let first_docs = doc_comments(src, comments, first).first().map(|c| c.span.lo).unwrap_or(first);
+    for c in comments.iter().filter(|c| c.own_line && c.span.lo < first_docs) {
+        out.push_str(src.slice(c.span));
+        out.push('\n');
+    }
     for item in &file.items {
-        if matches!(item.kind, ItemKind::Test(_)) {
+        if matches!(item.kind, ItemKind::Test(_)) || is_private(item) {
             continue;
         }
         if !out.is_empty() {
@@ -59,12 +70,40 @@ pub fn outline(src: &Source, file: &File, comments: &[Comment]) -> String {
                 p.w("drop ");
                 p.ty(&d.ty);
             }
+            ItemKind::Type(t) => {
+                // Private fields are an implementation detail.
+                let mut t = t.clone();
+                if let TypeBody::Struct { fields, one_line } = &mut t.body {
+                    fields.retain(|f| !f.name.name.starts_with('_'));
+                    *one_line = true;
+                    if fields.is_empty() {
+                        p.w("type ");
+                        p.w(&t.name.name);
+                        p.generics(&t.generics);
+                        p.nl(0);
+                        out.push_str(&p.out);
+                        continue;
+                    }
+                }
+                let it = Item { kind: ItemKind::Type(t), span: item.span };
+                p.item(&it);
+            }
             _ => p.item(item),
         }
         p.nl(0);
         out.push_str(&p.out);
     }
     out
+}
+
+fn is_private(item: &Item) -> bool {
+    match &item.kind {
+        ItemKind::Fn(f) => f.name.name.starts_with('_'),
+        ItemKind::Const(c) => c.name.name.starts_with('_'),
+        ItemKind::Type(t) => t.name.name.starts_with('_'),
+        ItemKind::Enum(e) => e.name.name.starts_with('_'),
+        _ => false,
+    }
 }
 
 /// Own-line comments directly above `pos`, with no blank line in between.
@@ -381,8 +420,12 @@ impl<'a> Printer<'a> {
         }
         self.w("fn ");
         if let Some((ty, g)) = &f.recv {
-            self.w(&ty.name);
-            self.generics(g);
+            if ty.name == "[]" {
+                self.generics(g);
+            } else {
+                self.w(&ty.name);
+                self.generics(g);
+            }
             self.w(".");
         }
         self.w(&f.name.name);
@@ -424,7 +467,20 @@ impl<'a> Printer<'a> {
 
     fn fn_decl(&mut self, f: &FnDecl) {
         self.fn_sig(f);
-        let Some(body) = &f.body else { return };
+        let Some(body) = &f.body else {
+            // An intrinsic (standard library only): its clauses, and no body.
+            for e in &f.pre {
+                self.nl(f.sig_span.hi);
+                self.w("  pre ");
+                self.expr(e);
+            }
+            for ex in &f.ex {
+                self.nl(f.sig_span.hi);
+                self.w("  ");
+                self.example(ex);
+            }
+            return;
+        };
         if f.pre.is_empty() && f.ex.is_empty() {
             self.w(" ");
             self.block(body);

@@ -1,0 +1,193 @@
+// Methods of arrays, `[T]`. Arrays grow as needed and are copied cheaply: a
+// copy shares the elements until one of them changes. `xs[i]` traps when `i`
+// is out of range; `xs[a..b]` is a sub-array.
+
+fn [T].len(self) -> int
+
+fn [T].is_empty(self) -> bool {
+  return self.len() == 0
+}
+
+// Adds `v` at the end.
+fn [T].push(inout self, v: sink T)
+
+// Removes and returns the last element, or `none` if the array is empty.
+fn [T].pop(inout self) -> ?T
+
+// Inserts `v` at index `i`, moving later elements up. `i` may equal the length.
+fn [T].insert(inout self, i: int, v: sink T)
+
+// Removes and returns the element at index `i`, moving later elements down.
+fn [T].remove(inout self, i: int) -> T
+
+fn [T].clear(inout self)
+
+// Sorts in place, smallest first. Equal elements keep their order.
+fn [T: Ord].sort(inout self)
+  ex _sorted_example() == [1, 2, 3]
+
+// Reverses in place.
+fn [T].reverse(inout self)
+
+// Adds every element of `other` at the end.
+fn [T].extend(inout self, other: [T]) {
+  for x in other {
+    self.push(x)
+  }
+}
+
+fn [T].first(self) -> ?T {
+  if self.len() == 0 {
+    return none
+  }
+  return self[0]
+}
+
+fn [T].last(self) -> ?T {
+  if self.len() == 0 {
+    return none
+  }
+  return self[self.len() - 1]
+}
+
+// The element at index `i`, or `none` when `i` is out of range.
+fn [T].get(self, i: int) -> ?T {
+  if i < 0 || i >= self.len() {
+    return none
+  }
+  return self[i]
+}
+
+fn [T: Eq].contains(self, x: T) -> bool {
+  return self.index_of(x) != none
+}
+
+// The index of the first element equal to `x`, or `none`.
+fn [T: Eq].index_of(self, x: T) -> ?int {
+  for i, y in self {
+    if y == x {
+      return i
+    }
+  }
+  return none
+}
+
+// `f` applied to every element.
+fn [T].map[U, !E](self, f: fn(T) -> U ! E) -> [U] ! E
+  ex [1, 2, 3].map(|x| x * 10) == [10, 20, 30]
+{
+  var out: [U] = []
+  for x in self {
+    out.push(f(x))
+  }
+  return out
+}
+
+// The elements for which `keep` is true.
+fn [T].filter[!E](self, keep: fn(T) -> bool ! E) -> [T] ! E
+  ex [1, 2, 3, 4].filter(|x| x % 2 == 0) == [2, 4]
+{
+  var out: [T] = []
+  for x in self {
+    if keep(x) {
+      out.push(x)
+    }
+  }
+  return out
+}
+
+fn [T].any[!E](self, pred: fn(T) -> bool ! E) -> bool ! E {
+  for x in self {
+    if pred(x) {
+      return true
+    }
+  }
+  return false
+}
+
+fn [T].all[!E](self, pred: fn(T) -> bool ! E) -> bool ! E {
+  for x in self {
+    if !pred(x) {
+      return false
+    }
+  }
+  return true
+}
+
+// Sorts in place by the key `key` returns, smallest first. Equal keys keep their order.
+fn [T].sort_by[K: Ord, !E](inout self, key: fn(T) -> K ! E) ! E
+  ex _sorted_by_example() == ["b", "cc", "aaa"]
+{
+  var keyed: [(K, int)] = []
+  for i, x in self {
+    keyed.push((key(x), i))
+  }
+  keyed.sort()
+  var out: [T] = []
+  for pair in keyed {
+    out.push(self[pair.1])
+  }
+  self = out
+}
+
+// The elements joined into one string, with `sep` between them.
+fn [str].join(self, sep: str) -> str
+  ex ["a", "b", "c"].join(", ") == "a, b, c"
+{
+  var out = ""
+  for i, s in self {
+    if i > 0 {
+      out += sep
+    }
+    out += s
+  }
+  return out
+}
+
+fn [int].sum(self) -> int {
+  var total = 0
+  for x in self {
+    total += x
+  }
+  return total
+}
+
+// The smallest element, or `none` if the array is empty.
+fn [T: Ord].min(self) -> ?T {
+  if self.len() == 0 {
+    return none
+  }
+  var best = self[0]
+  for x in self {
+    if x < best {
+      best = x
+    }
+  }
+  return best
+}
+
+// The largest element, or `none` if the array is empty.
+fn [T: Ord].max(self) -> ?T {
+  if self.len() == 0 {
+    return none
+  }
+  var best = self[0]
+  for x in self {
+    if x > best {
+      best = x
+    }
+  }
+  return best
+}
+
+fn _sorted_example() -> [int] {
+  var xs = [3, 1, 2]
+  xs.sort()
+  return xs
+}
+
+fn _sorted_by_example() -> [str] {
+  var xs = ["aaa", "b", "cc"]
+  xs.sort_by(|s| s.len())
+  return xs
+}

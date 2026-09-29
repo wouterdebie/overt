@@ -1,0 +1,19 @@
+// Small numeric helpers. Methods like `x.abs()` and `x.sqrt()` are on the number types.
+
+fn min[T: Ord](a: T, b: T) -> T
+  ex math.min(3, b: 5) == 3
+{
+  if b < a {
+    return b
+  }
+  return a
+}
+
+fn max[T: Ord](a: T, b: T) -> T {
+  if b > a {
+    return b
+  }
+  return a
+}
+
+const PI = 3.141592653589793

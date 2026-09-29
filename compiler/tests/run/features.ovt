@@ -1,0 +1,210 @@
+// Milestone 1 features working together.
+const LIMIT = 3
+
+type Point { x: int, y: int = 0 }
+
+fn Point.sum(self) -> int {
+  return self.x + self.y
+}
+
+fn Point.shift(inout self, dx: int) {
+  self.x += dx
+}
+
+fn Point.origin() -> Point {
+  return Point(x: 0)
+}
+
+enum Shape {
+  Circle(r: int)
+  Rect(w: int, h: int)
+  Empty
+}
+
+fn area(s: Shape) -> int {
+  return match s {
+    .Circle(r) => 3 * r * r
+    .Rect(w, h) if w == h => w * w
+    .Rect(w, h) => w * h
+    .Empty => 0
+  }
+}
+
+// A recursive type: the compiler boxes the fields that contain it.
+enum Tree {
+  Leaf
+  Node(left: Tree, value: int, right: Tree)
+}
+
+fn insert(t: Tree, v: int) -> Tree {
+  return match t {
+    .Leaf => Tree.Node(left: .Leaf, value: v, right: .Leaf)
+    .Node(left, value, right) => {
+      if v < value {
+        Tree.Node(left: insert(left, v), value, right)
+      } else {
+        Tree.Node(left, value, right: insert(right, v))
+      }
+    }
+  }
+}
+
+fn in_order(t: Tree, out: inout [int]) {
+  if let n = node_value(t) {
+    match t {
+      .Node(left, right) => {
+        in_order(left, inout out)
+        out.push(n)
+        in_order(right, inout out)
+      }
+      .Leaf => {}
+    }
+  }
+}
+
+fn node_value(t: Tree) -> ?int {
+  return match t {
+    .Node(value) => value
+    .Leaf => none
+  }
+}
+
+type Pair[A, B] { first: A, second: B }
+
+fn swap[A, B](p: Pair[A, B]) -> Pair[B, A] {
+  return Pair(first: p.second, second: p.first)
+}
+
+fn largest[T: Ord](xs: [T]) -> ?T {
+  var best = xs.first() else return none
+  for x in xs {
+    if x > best {
+      best = x
+    }
+  }
+  return best
+}
+
+fn parse_kv(line: str) -> (str, int) ! fail {
+  let i = line.find("=") else fail(.Invalid, "no '=' in \"${line}\"")
+  let n = int.parse(line[i + 1..].trim())?
+  return (line[..i].trim(), n)
+}
+
+fn describe(xs: [int]) -> str {
+  return match xs {
+    [] => "empty"
+    [x] => "one: ${x}"
+    [first, ..rest] => "first ${first}, then ${rest.len()} more"
+  }
+}
+
+fn classify(b: u8) -> str {
+  return match b {
+    'a'..='z' => "lower"
+    'A'..='Z' => "upper"
+    '0'..='9' => "digit"
+    ' ' | '\t' => "space"
+    _ => "other"
+  }
+}
+
+fn main() ! io, fail {
+  // Structs and methods.
+  var p = Point(x: 3, y: 4)
+  p.shift(10)
+  print("${p} ${p.sum()} ${Point.origin()}")
+
+  // Enums and match.
+  let shapes = [Shape.Circle(r: 2), .Rect(w: 3, h: 3), .Rect(w: 2, h: 5), .Empty]
+  print(shapes.map(area))
+
+  // A recursive enum.
+  var t = Tree.Leaf
+  for v in [5, 2, 8, 1, 9, 3] {
+    t = insert(t, v)
+  }
+  var sorted: [int] = []
+  in_order(t, inout sorted)
+  print(sorted)
+
+  // Generics and closures.
+  let q = swap(Pair(first: "a", second: 1))
+  print("${q.first} ${q.second}")
+  print(largest([3, 9, 2]))
+  let words: [str] = []
+  print(largest(words))
+  let base = 100
+  print([1, 2, 3].map(|x| x + base).filter(|x| x % 2 == 1))
+  var names = ["carol", "al", "bob"]
+  names.sort_by(|n| n.len())
+  print(names)
+
+  // Maps and sets.
+  var counts: Map[str, int] = {}
+  for w in "the cat the hat the end".split(" ") {
+    counts[w] = (counts.get(w) else 0) + 1
+  }
+  print(counts)
+  counts["cat"] += 10
+  for k, v in counts {
+    if v > 1 {
+      print("${k}=${v}")
+    }
+  }
+  print(counts.contains("hat") && !counts.contains("dog"))
+  print(counts.remove("hat"))
+  print(counts.len())
+  let seen = {3, 1, 3, 2}
+  print("${seen} ${seen.len()} ${seen.contains(2)}")
+
+  // Optionals.
+  let maybe: ?int = none
+  print(maybe else -1)
+  var stack = [1, 2, 3]
+  while let top = stack.pop() {
+    print("popped ${top}")
+  }
+
+  // Failure handling.
+  print(parse_kv("a = 5")?)
+  let bad = parse_kv("b = x") catch e {
+    print("caught ${e.kind}: ${e.msg}")
+    ("?", 0)
+  }
+  print(bad)
+  print(parse_kv("nothing") else ("default", 1))
+
+  // Strings.
+  var s = "Hello"
+  s += ", World"
+  print("${s.to_lower()} ${s.len()} ${s[0]} ${s[7..]}")
+  print("  padded  ".trim().replace("d", new: "D"))
+  print("a\nb\r\nc".lines())
+  print([classify('q'), classify('Q'), classify('7'), classify(' '), classify('-')])
+
+  // Arrays.
+  var xs = [10, 20, 30]
+  xs.insert(0, v: 5)
+  print("${xs.remove(2)} ${xs} ${xs[1..3]}")
+  for inout x in xs {
+    x *= 2
+  }
+  for i, x in xs {
+    if i < LIMIT {
+      print("${i}: ${x}")
+    }
+  }
+  print(describe([]))
+  print(describe([7]))
+  print(describe([1, 2, 3]))
+  let copy = xs
+  xs.push(99)
+  print("${copy.len()} ${xs.len()}")
+
+  // Tuples and conversions.
+  let (a, b) = (7, "seven")
+  print("${a} ${b}")
+  let big: u8 = 200
+  print("${big +% 100} ${int(big) + 100} ${f64(a) / 2.0}")
+}

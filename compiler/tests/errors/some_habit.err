@@ -1,0 +1,2 @@
+some_habit.ovt:4:14: error: unknown name `Some`; a value converts to an optional by itself, so write just the value
+some_habit.ovt:7:10: error: unknown name `None`; the empty optional is `none`

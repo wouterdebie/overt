@@ -1,0 +1,45 @@
+// Always in scope, in every module.
+
+// Prints `x` and a newline to stdout. Strings print as they are; other values
+// print the way `"${x}"` shows them.
+fn print[T](x: T) ! io
+
+// Prints `x` and a newline to stderr.
+fn eprint[T](x: T) ! io
+
+// Prints `x` to stderr with its source location, and returns it. Allowed in
+// pure code, and its result may be ignored.
+fn dbg[T](x: T) -> T
+
+// Stops the program with `msg` and the source location. For bugs, not for
+// expected errors.
+fn trap(msg: str) -> never
+
+// Stops the program if `cond` is false. For `a == b`, the message shows both sides.
+fn assert(cond: bool, msg: str = "")
+
+// Stops the program at code that isn't written yet.
+fn todo() -> never
+
+// Fails with an error. The enclosing function must declare `! fail`.
+fn fail(kind: ErrKind, msg: str) -> never ! fail
+
+// The hash of a value, as `Map` and `Set` use it.
+fn hash[T: Hash](x: T) -> u64
+
+// The kind of an error. `http.serve` turns each kind into a status code, and a
+// failing `main` exits with status 1.
+enum ErrKind {
+  Invalid
+  NotFound
+  Denied
+  Conflict
+  Timeout
+  Cancelled
+  Unavailable
+  Io
+  Internal
+}
+
+// An error, as `catch e` binds it.
+type Err { kind: ErrKind, msg: str }

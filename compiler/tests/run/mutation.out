@@ -1,0 +1,7 @@
+Outer(name: "o!", inner: Inner(n: 2, tags: ["x", "y"]), items: [Inner(n: 10, tags: ["a", "b"]), Inner(n: 21, tags: ["c"])])
+Outer(name: "o", inner: Inner(n: 1, tags: []), items: [Inner(n: 10, tags: ["a"]), Inner(n: 20, tags: [])])
+[[1, 99], [3, 4, 5]] [[1, 2], [3, 4]]
+[2, 2, 3] [7, 8, 10]
+6 16
+0,1,2,3,4,end 0,1,2,3,4,
+count was 1 now 50

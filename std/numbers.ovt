@@ -1,0 +1,83 @@
+// Methods of the number types. Convert between them with `int(x)`, `u8(x)`,
+// `f64(x)` and so on; a conversion traps if the value doesn't fit.
+
+// Parses a decimal integer with an optional leading `-`. Fails with `.Invalid` otherwise.
+fn int.parse(s: str) -> int ! fail
+  ex int.parse("42") == 42
+  ex int.parse("-7") == -7
+  ex int.parse("4x") fails .Invalid
+  ex int.parse("") fails .Invalid
+
+fn int.abs(self) -> int {
+  if self < 0 {
+    return -self
+  }
+  return self
+}
+
+fn int.min(self, other: int) -> int {
+  if other < self {
+    return other
+  }
+  return self
+}
+
+fn int.max(self, other: int) -> int {
+  if other > self {
+    return other
+  }
+  return self
+}
+
+// `self` to the power `exp`.
+fn int.pow(self, exp: int) -> int
+  pre exp >= 0
+  ex 3.pow(4) == 81
+{
+  var out = 1
+  for _i in 0..exp {
+    out *= self
+  }
+  return out
+}
+
+// Parses a decimal number like `1.5`, `-2` or `3e8`. Fails with `.Invalid` otherwise.
+fn f64.parse(s: str) -> f64 ! fail
+  ex f64.parse("1.5") == 1.5
+
+fn f64.abs(self) -> f64
+fn f64.sqrt(self) -> f64
+fn f64.floor(self) -> f64
+fn f64.ceil(self) -> f64
+fn f64.round(self) -> f64
+
+// Whether the byte is an ASCII letter.
+fn u8.is_alpha(self) -> bool {
+  return (self >= 'a' && self <= 'z') || (self >= 'A' && self <= 'Z')
+}
+
+// Whether the byte is an ASCII digit.
+fn u8.is_digit(self) -> bool {
+  return self >= '0' && self <= '9'
+}
+
+// Whether the byte is a space, tab, newline or carriage return.
+fn u8.is_space(self) -> bool {
+  return self == ' ' || self == '\t' || self == '\n' || self == '\r'
+}
+
+// The lowercase form of an ASCII letter; other bytes unchanged.
+fn u8.to_lower(self) -> u8 {
+  if self >= 'A' && self <= 'Z' {
+    return self + 32
+  }
+  return self
+}
+
+// The uppercase form of an ASCII letter; other bytes unchanged.
+fn u8.to_upper(self) -> u8 {
+  if self >= 'a' && self <= 'z' {
+    return self - 32
+  }
+  return self
+}

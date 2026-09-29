@@ -1,0 +1,144 @@
+// Methods of `str`: UTF-8 text, copied cheaply. Positions are byte offsets:
+// `s[i]` is a byte (`u8`) and `s[a..b]` is a substring. Join strings with `+`
+// or `"${a}${b}"`; `s += t` appends in place.
+
+// The length in bytes.
+fn str.len(self) -> int
+  ex "héllo".len() == 6
+
+fn str.is_empty(self) -> bool {
+  return self.len() == 0
+}
+
+// The bytes, sharing the string's memory.
+fn str.bytes(self) -> [u8]
+
+// A string from UTF-8 bytes. Fails with `.Invalid` if they aren't valid UTF-8.
+fn str.from_bytes(b: [u8]) -> str ! fail
+
+// The byte offset of the first `pat`, or `none`.
+fn str.find(self, pat: str) -> ?int
+  ex "a=b=c".find("=") == 1
+  ex "abc".find("x") == none
+
+// ASCII letters in lowercase; other bytes unchanged.
+fn str.to_lower(self) -> str
+  ex "Hello, World".to_lower() == "hello, world"
+
+// ASCII letters in uppercase; other bytes unchanged.
+fn str.to_upper(self) -> str
+
+// The Unicode code points.
+fn str.runes(self) -> [u32]
+
+fn str.contains(self, pat: str) -> bool {
+  return self.find(pat) != none
+}
+
+fn str.starts_with(self, prefix: str) -> bool
+  ex "hello".starts_with("he")
+  ex !"hello".starts_with("lo")
+{
+  return self.len() >= prefix.len() && self[..prefix.len()] == prefix
+}
+
+fn str.ends_with(self, suffix: str) -> bool
+  ex "hello".ends_with("lo")
+{
+  return self.len() >= suffix.len() && self[self.len() - suffix.len()..] == suffix
+}
+
+// Without leading and trailing spaces, tabs, newlines and carriage returns.
+fn str.trim(self) -> str
+  ex "  a b \n".trim() == "a b"
+{
+  return self.trim_start().trim_end()
+}
+
+fn str.trim_start(self) -> str {
+  var i = 0
+  while i < self.len() && self[i].is_space() {
+    i += 1
+  }
+  return self[i..]
+}
+
+fn str.trim_end(self) -> str {
+  var n = self.len()
+  while n > 0 && self[n - 1].is_space() {
+    n -= 1
+  }
+  return self[..n]
+}
+
+// The parts between each `sep`.
+fn str.split(self, sep: str) -> [str]
+  pre sep.len() > 0
+  ex "a,b,,c".split(",") == ["a", "b", "", "c"]
+  ex "abc".split(",") == ["abc"]
+{
+  var parts: [str] = []
+  var rest = self
+  while let i = rest.find(sep) {
+    parts.push(rest[..i])
+    rest = rest[i + sep.len()..]
+  }
+  parts.push(rest)
+  return parts
+}
+
+// The lines, without their `\n` or `\r\n`. A final newline doesn't start another line.
+fn str.lines(self) -> [str]
+  ex "a\nb\r\n\nc".lines() == ["a", "b", "", "c"]
+  ex "a\n".lines() == ["a"]
+  ex "".lines() == []
+{
+  var out: [str] = []
+  var start = 0
+  for i in 0..self.len() {
+    if self[i] == '\n' {
+      var stop = i
+      if stop > start && self[stop - 1] == '\r' {
+        stop -= 1
+      }
+      out.push(self[start..stop])
+      start = i + 1
+    }
+  }
+  if start < self.len() {
+    var stop = self.len()
+    if self[stop - 1] == '\r' {
+      stop -= 1
+    }
+    out.push(self[start..stop])
+  }
+  return out
+}
+
+// Every `old` replaced by `new`.
+fn str.replace(self, old: str, new: str) -> str
+  pre old.len() > 0
+  ex "a-b-c".replace("-", new: "+") == "a+b+c"
+{
+  var out = ""
+  var rest = self
+  while let i = rest.find(old) {
+    out += rest[..i]
+    out += new
+    rest = rest[i + old.len()..]
+  }
+  out += rest
+  return out
+}
+
+// `n` copies, joined.
+fn str.repeat(self, n: int) -> str
+  pre n >= 0
+  ex "ab".repeat(3) == "ababab"
+{
+  var out = ""
+  for _i in 0..n {
+    out += self
+  }
+  return out
+}

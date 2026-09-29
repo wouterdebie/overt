@@ -1,0 +1,56 @@
+// Closures and function values: capture, storage, effects that pass through.
+type Handler { name: str, run: fn(int) -> int }
+
+fn apply_all(hs: [Handler], x: int) -> [str] {
+  return hs.map(|h| "${h.name}=${h.run(x)}")
+}
+
+fn twice(f: fn(int) -> int, x: int) -> int {
+  return f(f(x))
+}
+
+fn inc(x: int) -> int {
+  return x + 1
+}
+
+fn parse_all(items: [str]) -> [int] ! fail {
+  return items.map(|s| int.parse(s)?)?
+}
+
+fn parse_all_named(items: [str]) -> [int] ! fail {
+  return items.map(int.parse)?
+}
+
+fn make_adder(n: int) -> fn(int) -> int {
+  return |x| x + n
+}
+
+fn main() ! io, fail {
+  let factor = 3
+  let hs = [Handler(name: "double", run: |x| x * 2), Handler(name: "times", run: |x| x * factor), Handler(name: "inc", run: inc)]
+  print(apply_all(hs, x: 5))
+  print(twice(inc, x: 10))
+  print(twice(make_adder(5), x: 1))
+  print(parse_all(["1", "2", "30"])?)
+  print(parse_all_named(["4", "5"])?)
+  let bad = parse_all(["1", "x"]) catch e {
+    print("failed: ${e.msg}")
+    []
+  }
+  print(bad)
+  let groups: Map[str, [int]] = {"odd": [1, 3], "even": [2]}
+  var g = groups
+  var odd = g["odd"]
+  odd.push(5)
+  g["odd"] = odd
+  print("${groups} ${g}")
+  let nested: [?Handler] = [none, hs[0]]
+  for h in nested {
+    if let found = h {
+      print(found.name)
+    } else {
+      print("none")
+    }
+  }
+  log.info("done")
+}

@@ -10,13 +10,22 @@ use crate::source::{Source, Span};
 
 type R<T> = Result<T, Diag>;
 
-/// Parses a file. With `allow_snippet`, a file that doesn't start with a
-/// declaration is parsed as a list of statements (used for code examples).
-pub fn parse(src: &Source, tokens: Vec<Token>, allow_snippet: bool) -> (File, Vec<Diag>) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ParseMode {
+    File,
+    /// A file that doesn't start with a declaration is parsed as a list of
+    /// statements (used for code examples).
+    Snippet,
+    /// Standard library files: functions may have no body (intrinsics).
+    Std,
+}
+
+pub fn parse(src: &Source, tokens: Vec<Token>, mode: ParseMode) -> (File, Vec<Diag>) {
     let mut p = Parser::new(src, tokens);
+    p.std = mode == ParseMode::Std;
     p.skip_newlines();
     let mut file = File::default();
-    if allow_snippet && !p.at_item_start() && !p.at_eof() {
+    if mode == ParseMode::Snippet && !p.at_item_start() && !p.at_eof() {
         while !p.at_eof() {
             match p.stmt().and_then(|s| p.end_line().map(|_| s)) {
                 Ok(s) => file.stmts.push(s),
@@ -104,11 +113,12 @@ struct Parser<'a> {
     pos: usize,
     last_hi: u32,
     diags: Vec<Diag>,
+    std: bool,
 }
 
 impl<'a> Parser<'a> {
     fn new(src: &'a Source, toks: Vec<Token>) -> Parser<'a> {
-        Parser { src, toks, pos: 0, last_hi: 0, diags: Vec::new() }
+        Parser { src, toks, pos: 0, last_hi: 0, diags: Vec::new(), std: false }
     }
 
     // ---- token helpers ----
@@ -403,8 +413,17 @@ impl<'a> Parser<'a> {
         let lo = self.span().lo;
         let is_unsafe = self.eat_kw(Kw::Unsafe);
         self.expect_kw(Kw::Fn)?;
-        let first = self.ident("a function name")?;
-        let first_generics = self.generics()?;
+        // `fn [T].push` declares a method of arrays.
+        let (first, first_generics) = if self.at(P::LBracket) {
+            let lo = self.span().lo;
+            let g = self.generics()?;
+            if g.len() != 1 {
+                return Err(Diag::new(Span { lo, hi: self.last_hi }, "an array receiver has one element type, like `fn [T].name`"));
+            }
+            (Ident { name: "[]".into(), span: Span { lo, hi: self.last_hi } }, g)
+        } else {
+            (self.ident("a function name")?, self.generics()?)
+        };
         let (recv, name, generics) = if self.eat(P::Dot) {
             let name = self.ident("a method name")?;
             let generics = self.generics()?;
@@ -437,6 +456,7 @@ impl<'a> Parser<'a> {
             return Ok(f);
         }
         loop {
+            let (line_end, line_end_hi) = (self.pos, self.last_hi);
             self.skip_newlines();
             if self.at_ident("pre") {
                 self.bump();
@@ -458,6 +478,12 @@ impl<'a> Parser<'a> {
                 f.ex.push(Example { expr, fails, span: Span { lo: elo, hi: self.last_hi } });
             } else if self.at(P::LBrace) {
                 f.body = Some(self.block()?);
+                return Ok(f);
+            } else if self.std {
+                // An intrinsic: implemented by the compiler. Leave the newline
+                // for the caller, which expects the declaration to end there.
+                self.pos = line_end;
+                self.last_hi = line_end_hi;
                 return Ok(f);
             } else {
                 return Err(self.expected(&format!("the body `{{ ... }}` of `fn {}`", f.name.name)));
@@ -1157,7 +1183,19 @@ impl<'a> Parser<'a> {
                 let b = self.block()?;
                 Expr { span: b.span, kind: ExprKind::Block(b) }
             } else {
-                self.expr(0)?
+                let e = self.expr(0)?;
+                // `pat => x += 1`, as in Rust: an assignment becomes a one-statement block.
+                match self.peek() {
+                    Tok::P(p) if assign_op(*p).is_some() => {
+                        let op = assign_op(*p).unwrap();
+                        self.bump();
+                        let value = self.expr(0)?;
+                        let span = Span { lo: e.span.lo, hi: self.last_hi };
+                        let stmt = Stmt { kind: StmtKind::Assign { target: e, op, value }, span };
+                        Expr { kind: ExprKind::Block(Block { stmts: vec![stmt], span }), span }
+                    }
+                    _ => e,
+                }
             };
             arms.push(Arm { pat, guard, body, span: Span { lo: alo, hi: self.last_hi } });
             // A trailing comma is a Rust habit; accept it, `ovt fmt` removes it.

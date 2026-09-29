@@ -1,0 +1,16 @@
+// The process: arguments, environment, standard input and exiting.
+
+// The command-line arguments, without the program name.
+fn args() -> [str] ! io
+
+// The value of an environment variable, or `none`.
+fn env(name: str) -> ?str ! io
+
+// All of standard input. Fails with `.Invalid` if it isn't UTF-8.
+fn read_stdin() -> str ! io, fail
+
+// All of standard input, as bytes.
+fn read_stdin_bytes() -> [u8] ! io, fail
+
+// Ends the program with an exit status. Output printed so far is flushed.
+fn exit(status: int) -> never ! io

@@ -1,0 +1,4 @@
+fn main() ! io {
+  let m: Map[str, int] = {"a": 1}
+  print(m._count)
+}

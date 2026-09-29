@@ -1,0 +1,70 @@
+// Changing values in place, and copies staying independent.
+type Inner { n: int, tags: [str] }
+type Outer { name: str, inner: Inner, items: [Inner] }
+
+enum List {
+  Nil
+  Cons(head: int, tail: List)
+}
+
+fn bump(n: inout int) {
+  n += 1
+}
+
+fn add_tag(tags: inout [str], t: str) {
+  tags.push(t)
+}
+
+fn sum(l: List) -> int {
+  return match l {
+    .Nil => 0
+    .Cons(head, tail) => head + sum(tail)
+  }
+}
+
+fn main() ! io {
+  var o = Outer(name: "o", inner: Inner(n: 1, tags: []), items: [Inner(n: 10, tags: ["a"]), Inner(n: 20, tags: [])])
+  let before = o
+  bump(inout o.inner.n)
+  bump(inout o.items[1].n)
+  add_tag(inout o.items[0].tags, t: "b")
+  o.items[1].tags.push("c")
+  o.inner.tags = ["x", "y"]
+  o.name += "!"
+  print(o)
+  print(before)
+
+  // Arrays of arrays: changing one copy leaves the other alone.
+  var grid = [[1, 2], [3, 4]]
+  let saved = grid
+  grid[0][1] = 99
+  grid[1].push(5)
+  print("${grid} ${saved}")
+
+  // Swapping through `inout` elements of different arrays.
+  var xs = [1, 2, 3]
+  var ys = [7, 8, 9]
+  bump(inout xs[0])
+  bump(inout ys[2])
+  print("${xs} ${ys}")
+
+  // A recursive enum shares its boxes; copies are independent.
+  let l = List.Cons(head: 1, tail: .Cons(head: 2, tail: .Cons(head: 3, tail: .Nil)))
+  let l2 = List.Cons(head: 10, tail: l)
+  print("${sum(l)} ${sum(l2)}")
+
+  // Strings built in place.
+  var s = ""
+  for i in 0..5 {
+    s += "${i},"
+  }
+  let t = s
+  s += "end"
+  print("${s} ${t}")
+
+  // A closure captures a copy.
+  var count = 1
+  let show = || "count was ${count}"
+  count = 50
+  print("${show()} now ${count}")
+}

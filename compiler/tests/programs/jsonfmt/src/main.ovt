@@ -1,0 +1,233 @@
+// A reference jsonfmt, used to test the compiler (tasks/01-jsonfmt is written by fresh agents).
+type Parser { src: str, pos: int = 0, out: str = "" }
+
+fn Parser.peek(self) -> ?u8 {
+  if self.pos < self.src.len() {
+    return self.src[self.pos]
+  }
+  return none
+}
+
+// Fails at the current position.
+fn Parser.fail_here(self, msg: str) -> str ! fail {
+  var line = 1
+  var col = 1
+  for i in 0..self.pos {
+    if self.src[i] == '\n' {
+      line += 1
+      col = 1
+    } else {
+      col += 1
+    }
+  }
+  fail(.Invalid, "line ${line}, column ${col}: ${msg}")
+}
+
+fn Parser.skip_ws(inout self) {
+  while let b = self.peek() {
+    if b != ' ' && b != '\t' && b != '\n' && b != '\r' {
+      return
+    }
+    self.pos += 1
+  }
+}
+
+fn Parser.expect(inout self, b: u8, what: str) ! fail {
+  if self.peek() != b {
+    _ = self.fail_here("expected ${what}")?
+  }
+  self.pos += 1
+}
+
+fn Parser.value(inout self, depth: int) ! fail {
+  self.skip_ws()
+  let b = self.peek() else {
+    _ = self.fail_here("expected a value")?
+    return
+  }
+  match b {
+    '{' => self.object(depth)?
+    '[' => self.array(depth)?
+    '"' => self.string()?
+    't' => self.word("true")?
+    'f' => self.word("false")?
+    'n' => self.word("null")?
+    '-' | '0'..='9' => self.number()?
+    _ => {
+      _ = self.fail_here("expected a value")?
+    }
+  }
+}
+
+fn Parser.word(inout self, w: str) ! fail {
+  for i in 0..w.len() {
+    self.expect(w[i], what: "`${w}`")?
+  }
+  self.out += w
+}
+
+fn Parser.digits(inout self) ! fail {
+  let b = self.peek() else fail(.Invalid, "")
+  if !b.is_digit() {
+    _ = self.fail_here("expected a digit")?
+  }
+  while let d = self.peek() {
+    if !d.is_digit() {
+      return
+    }
+    self.pos += 1
+  }
+}
+
+fn Parser.digits_or_fail(inout self) ! fail {
+  if self.peek() == none {
+    _ = self.fail_here("expected a digit")?
+  }
+  self.digits()?
+}
+
+fn Parser.number(inout self) ! fail {
+  let start = self.pos
+  if self.peek() == '-' {
+    self.pos += 1
+  }
+  if self.peek() == '0' {
+    self.pos += 1
+  } else {
+    self.digits_or_fail()?
+  }
+  if self.peek() == '.' {
+    self.pos += 1
+    self.digits_or_fail()?
+  }
+  if self.peek() == 'e' || self.peek() == 'E' {
+    self.pos += 1
+    if self.peek() == '+' || self.peek() == '-' {
+      self.pos += 1
+    }
+    self.digits_or_fail()?
+  }
+  self.out += self.src[start..self.pos]
+}
+
+fn Parser.string(inout self) ! fail {
+  let start = self.pos
+  self.pos += 1
+  while true {
+    let b = self.peek() else {
+      _ = self.fail_here("unterminated string")?
+      return
+    }
+    if b < 0x20 {
+      _ = self.fail_here("control character in string")?
+    }
+    self.pos += 1
+    if b == '"' {
+      self.out += self.src[start..self.pos]
+      return
+    }
+    if b == '\\' {
+      let e = self.peek() else {
+        _ = self.fail_here("unterminated escape")?
+        return
+      }
+      match e {
+        '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => { self.pos += 1 }
+        'u' => {
+          self.pos += 1
+          for _i in 0..4 {
+            let h = self.peek() else {
+              _ = self.fail_here("expected a hex digit")?
+              return
+            }
+            if !(h.is_digit() || (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F')) {
+              _ = self.fail_here("expected a hex digit")?
+            }
+            self.pos += 1
+          }
+        }
+        _ => {
+          _ = self.fail_here("invalid escape")?
+        }
+      }
+    }
+  }
+}
+
+fn Parser.indent(inout self, depth: int) {
+  for _i in 0..depth {
+    self.out += "  "
+  }
+}
+
+fn Parser.array(inout self, depth: int) ! fail {
+  self.pos += 1
+  self.skip_ws()
+  if self.peek() == ']' {
+    self.pos += 1
+    self.out += "[]"
+    return
+  }
+  self.out += "[\n"
+  while true {
+    self.indent(depth + 1)
+    self.value(depth + 1)?
+    self.skip_ws()
+    if self.peek() == ',' {
+      self.pos += 1
+      self.out += ",\n"
+      continue
+    }
+    self.expect(']', what: "`,` or `]`")?
+    self.out += "\n"
+    self.indent(depth)
+    self.out += "]"
+    return
+  }
+}
+
+fn Parser.object(inout self, depth: int) ! fail {
+  self.pos += 1
+  self.skip_ws()
+  if self.peek() == '}' {
+    self.pos += 1
+    self.out += "{}"
+    return
+  }
+  self.out += "{\n"
+  while true {
+    self.skip_ws()
+    if self.peek() != '"' {
+      _ = self.fail_here("expected a string key")?
+    }
+    self.indent(depth + 1)
+    self.string()?
+    self.skip_ws()
+    self.expect(':', what: "`:`")?
+    self.out += ": "
+    self.value(depth + 1)?
+    self.skip_ws()
+    if self.peek() == ',' {
+      self.pos += 1
+      self.out += ",\n"
+      continue
+    }
+    self.expect('}', what: "`,` or `}`")?
+    self.out += "\n"
+    self.indent(depth)
+    self.out += "}"
+    return
+  }
+}
+
+fn main() ! io, fail {
+  let input = os.read_stdin_bytes()?
+  let text = str.from_bytes(input) else fail(.Invalid, "line 1, column 1: input isn't UTF-8")
+  var p = Parser(src: text)
+  p.value(0)?
+  p.skip_ws()
+  if p.pos != text.len() {
+    _ = p.fail_here("unexpected text after the document")?
+  }
+  print(p.out)
+}

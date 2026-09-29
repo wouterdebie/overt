@@ -1,0 +1,1 @@
+wrong_arg_type.ovt:6:15: error: argument `name` of `greet` must be `str`, found `int`

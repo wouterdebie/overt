@@ -1,0 +1,1 @@
+struct_ord.ovt:5:3: error: `Card` can't be ordered with `<` or sorted (only numbers, strings, tuples and arrays are ordered; sort `Card` values with `sort_by`)

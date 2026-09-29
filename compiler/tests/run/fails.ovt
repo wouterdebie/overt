@@ -1,0 +1,13 @@
+// A `main` that fails prints the message and exits with status 1.
+fn check(n: int) -> int ! fail {
+  if n > 2 {
+    fail(.Invalid, "${n} is too big")
+  }
+  return n
+}
+
+fn main() ! io, fail {
+  print(check(1)?)
+  print(check(5)?)
+  print("not reached")
+}

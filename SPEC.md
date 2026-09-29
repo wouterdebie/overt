@@ -50,11 +50,11 @@ test "hits count per key" ! fail {
 - A package is a directory with `src/`. Each `.ovt` file is a module named by its path: `src/api/users.ovt` is `api.users`. The program starts at `fn main() ! io, fail` in `src/main.ovt`.
 - There are no imports. Use any module by name (`users.find(id)`, `fs.read(path)`); inside a module, use bare names. Top-level declarations may appear in any order.
 - The top level holds only `const`, `type`, `enum`, `fn`, `extern`, `drop` and `test`. There are no global variables.
-- Naming is enforced: `snake_case` for variables, functions and modules, `PascalCase` for types and variants, `UPPER_CASE` for constants. Names inside `extern` blocks keep their C spelling.
+- Naming is enforced: `snake_case` for variables, functions and modules, `PascalCase` for types and variants, `UPPER_CASE` for constants. Names inside `extern` blocks keep their C spelling. Fields, functions and constants whose names start with `_` are private to their module.
 - No shadowing: a name can't be declared while another declaration of it is in scope (sibling blocks and `match` arms may reuse names), and a local can't reuse a module name.
 - Newlines end statements; there are no semicolons. A statement continues onto the next line when the line ends with an operator, `,` or an open bracket, or when the next line starts with `.`, `else` or `catch`.
 - `//` starts a comment. Comment lines directly above a declaration are its documentation.
-- Keywords: `fn type enum const let var if else match for in while break continue return inout sink self par lock as extern unsafe none true false`. `simd` is reserved. Words like `test`, `drop`, `pre`, `ex`, `catch` and `header` are only special where the syntax uses them, so they remain usable as names.
+- Keywords: `fn type enum const let var if else match for in while break continue return inout sink self par lock as extern unsafe none true false`. `simd` is reserved. Other words, like `test` and `header`, stay usable as names.
 
 ## Types
 
@@ -152,7 +152,7 @@ Everything is a value: assigning or passing one gives the receiver its own copy.
 | `x: sink T` | keep it (store it, send it) | `f(v)`; moved if this is `v`'s last use, otherwise copied |
 
 - Methods take `self`, `inout self` or `sink self`. Calling an `inout self` method needs a `var` receiver and no marker: `stack.push(1)`.
-- A variable passed as `inout` can't appear anywhere else in the same call.
+- A variable can't be passed as `inout` twice in one call.
 - Change values in place: `p.x = 1`, `xs[i] += 1`, `m[k] = v`, `for inout x in xs { x += 1 }`.
 - `drop T { ... }` makes `T` a resource: it can only be moved, and the block runs when the value is destroyed (`self` names it). A type containing a resource is a resource.
 
@@ -188,6 +188,7 @@ let n = int.parse(s) catch e {      // inspect it; e is an Err
 ```
 
 - When a call can fail and also returns `?T`, `else` handles the failure; `f()? else x` handles the `none`.
+- A failing `main` prints `error: <msg>` to stderr and exits with status 1.
 - `trap(msg)`, `assert(cond)`, `assert(cond, msg)` and `todo()` stop the program. They're for bugs, not expected errors.
 - `dbg(x)` prints `x` to stderr and returns it. It's allowed in pure code, and its result may be ignored.
 
@@ -227,16 +228,16 @@ return render(user, posts)
 extern "sqlite3" {                                     // links libsqlite3
   type sqlite3                                         // opaque C types
   type sqlite3_stmt
-  fn sqlite3_open(path: *u8, db: **sqlite3) -> c.int
-  fn sqlite3_close(db: *sqlite3) -> c.int
-  blocking fn sqlite3_step(stmt: *sqlite3_stmt) -> c.int
+  fn sqlite3_open(path: *u8, db: **sqlite3) -> ffi.int
+  fn sqlite3_close(db: *sqlite3) -> ffi.int
+  blocking fn sqlite3_step(stmt: *sqlite3_stmt) -> ffi.int
 }
 extern "z" header "zlib.h"                             // declarations generated from the header
 ```
 
-- Extern functions and raw pointers (`*T`) can only be used inside `unsafe { ... }` or an `unsafe fn`. Pointer operations are in `ptr`. `s.c_str()` gives a NUL-terminated copy.
+- Extern functions and raw pointers (`*T`) can only be used inside `unsafe { ... }` or an `unsafe fn`. Pointer operations are in `ffi`. `s.c_str()` gives a NUL-terminated copy.
 - Mark C calls that can block (disk, DNS, heavy work) `blocking`; they run on a separate thread pool. `blocking extern "z" header "zlib.h"` marks a whole header.
-- C types: `c.int c.uint c.long c.ulong c.size c.char`. Overt structs use C layout.
+- C types: `ffi.int ffi.uint ffi.long ffi.ulong ffi.size ffi.char`. Overt structs use C layout.
 - Wrap each C handle in a resource so the rest of the program stays safe:
 
 ```ovt
@@ -246,8 +247,8 @@ drop Db { unsafe { _ = sqlite3_close(self.raw) } }
 
 ## Standard library
 
-- Always in scope: `print(x) ! io`, `dbg`, `assert`, `trap`, `todo`, `fail`, `Err`, `ErrKind`, `Map`, `Set`, `Shared`, `Atomic`, `Chan`.
-- Modules: `math fs os time net http json log task ptr c`. For methods of built-in types, run `ovt outline str`, `ovt outline array` or `ovt outline Map`.
+- Always in scope: `print(x) ! io`, `eprint(x) ! io` (to stderr), `dbg`, `assert`, `trap`, `todo`, `fail`, `Err`, `ErrKind`, `Map`, `Set`, `Shared`, `Atomic`, `Chan`.
+- Modules: `math fs os time net http json log task ffi`. For methods of built-in types, run `ovt outline str`, `ovt outline array` or `ovt outline Map`.
 - `http.serve(addr, handler)` turns a handler's failure into a status: `.Invalid` 400, `.Denied` 403, `.NotFound` 404, `.Conflict` 409, `.Unavailable` 503, `.Timeout` 504, anything else 500.
 
 ## Tests

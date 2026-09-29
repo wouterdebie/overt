@@ -1,0 +1,6 @@
+fn main() ! io {
+  let xs = [1, 2, 3]
+  for x in xs.iter() {
+    print(x)
+  }
+}

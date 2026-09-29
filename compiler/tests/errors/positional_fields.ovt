@@ -1,0 +1,6 @@
+type Point { x: int, y: int }
+
+fn main() ! io {
+  let p = Point(1, 2)
+  print(p)
+}

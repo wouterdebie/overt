@@ -4,11 +4,4 @@ Write a program that prints `hello, world` followed by a newline and exits with 
 
 ## Testing
 
-`tests/run.sh <command>` runs the program with `<command>` and checks its output and exit status.
-
-For the Overt version, from this directory:
-
-```
-ovt build overt
-tests/run.sh overt/.ovt/bin/overt
-```
+`python3 tests/run.py <command>` runs the program with `<command>` and checks its output and exit status.

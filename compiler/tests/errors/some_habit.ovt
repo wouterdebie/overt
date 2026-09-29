@@ -1,0 +1,12 @@
+fn find(xs: [int], x: int) -> ?int {
+  for i, y in xs {
+    if y == x {
+      return Some(i)
+    }
+  }
+  return None
+}
+
+fn main() ! io {
+  print(find([1, 2], x: 2))
+}

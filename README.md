@@ -8,10 +8,13 @@ An experiment: a compiled programming language designed for coding agents to wri
 
 ## Status
 
-Milestone 0 is done:
-- `ovt` parses the whole grammar in SPEC.md, and `ovt fmt` and `ovt outline` work on any program.
-- It compiles a core subset to native code: `int`, `bool` and `str` values, functions, `if`/`while`/`for`, checked arithmetic, `pre` conditions and the `io` effect.
-- Everything else is reported as not supported yet.
+**Milestone 1: the compiler is done; the benchmark hasn't run yet.**
+- **Language:** the sequential language in SPEC.md compiles to native code, with value semantics (reference counting and copy-on-write, checked leak-free and clean under AddressSanitizer).
+  - Structs, enums (including recursive ones), generics, closures and methods.
+  - `match` with exhaustiveness checking, optionals, failure handling, effects and parameter modes.
+- **Standard library:** strings, arrays, `Map`, `Set`, `os`, `fs`, `math` and `log`, written mostly in Overt.
+- **Tools:** `ovt test` runs `ex` lines and `test` blocks, and `ovt outline` documents any module, including the standard library.
+- **Not yet:** concurrency (milestone 2), networking (3 and 4) and C interop (5).
 
 ## Building
 
@@ -22,4 +25,7 @@ cd compiler
 cargo build
 cargo test
 ./target/debug/ovt run ../tasks/00-hello/overt
+./target/debug/ovt outline str
 ```
+
+`bench/run.py <task> <lang>` runs a fresh agent on a task and records the result; `bench/report.py` summarizes the results.

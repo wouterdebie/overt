@@ -1,0 +1,13 @@
+// Log messages to stderr, one line each, with a level.
+
+fn info(msg: str) ! io {
+  eprint("info: ${msg}")
+}
+
+fn warn(msg: str) ! io {
+  eprint("warn: ${msg}")
+}
+
+fn error(msg: str) ! io {
+  eprint("error: ${msg}")
+}
