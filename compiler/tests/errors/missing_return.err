@@ -1,0 +1,1 @@
+missing_return.ovt:5:1: error: `sign` returns `int`, but can reach the end without `return`

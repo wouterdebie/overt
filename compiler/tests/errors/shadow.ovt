@@ -1,0 +1,7 @@
+fn main() ! io {
+  let n = 1
+  if n > 0 {
+    let n = 5
+    print(n)
+  }
+}

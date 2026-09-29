@@ -1,0 +1,1 @@
+shadow.ovt:4:9: error: `n` is already declared on line 2; pick a new name (Overt has no shadowing)

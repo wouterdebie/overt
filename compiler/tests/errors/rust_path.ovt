@@ -1,0 +1,4 @@
+fn main() ! io {
+  let n = std::max(1, 2)
+  print(n)
+}

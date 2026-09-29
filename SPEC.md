@@ -6,7 +6,7 @@ When unsure about a standard library API, run `ovt outline <module>` instead of 
 
 ## A complete program
 
-```
+```ovt
 // src/main.ovt: counts hits per key over HTTP.
 type Store { hits: Map[str, int] }
 type HitCount { key: str, hits: int }
@@ -54,7 +54,7 @@ test "hits count per key" ! fail {
 - No shadowing: a name can't be declared while another declaration of it is in scope (sibling blocks and `match` arms may reuse names), and a local can't reuse a module name.
 - Newlines end statements; there are no semicolons. A statement continues onto the next line when the line ends with an operator, `,` or an open bracket, or when the next line starts with `.`, `else` or `catch`.
 - `//` starts a comment. Comment lines directly above a declaration are its documentation.
-- Keywords: `fn type enum const let var if else match for in while break continue return inout sink self par lock as extern header blocking unsafe drop pre ex fails test catch none true false`. `simd` is reserved.
+- Keywords: `fn type enum const let var if else match for in while break continue return inout sink self par lock as extern unsafe none true false`. `simd` is reserved. Words like `test`, `drop`, `pre`, `ex`, `catch` and `header` are only special where the syntax uses them, so they remain usable as names.
 
 ## Types
 
@@ -79,7 +79,7 @@ test "hits count per key" ! fail {
 
 ## Declarations
 
-```
+```ovt
 const MAX_BODY = 1_000_000
 
 type Point { x: f64, y: f64 }
@@ -102,7 +102,7 @@ type Page[T] { items: [T], next: ?str }
 
 ## Functions
 
-```
+```ovt
 // Parses "key = value".
 fn parse(line: str) -> Entry ! fail
   pre line.len() < 4096
@@ -123,7 +123,7 @@ fn parse(line: str) -> Entry ! fail
 - Closures: `|x| x * 2`, or a block body `|x| { ... }` that uses `return`. They capture copies of the variables they use and can't assign to outer variables.
 - Methods are functions named `Type.name`, declared in the type's module. With `self` first they're called as `v.name(...)`; without it they're static (`Stack.new()`).
 
-```
+```ovt
 type Stack[T] { items: [T] }
 fn Stack[T].new() -> Stack[T] { return Stack(items: []) }
 fn Stack[T].push(inout self, v: T) { self.items.push(v) }
@@ -178,7 +178,7 @@ Patterns: literals, `_`, names (these bind), ranges (`'a'..='z'`), tuples, array
 - Failure is an effect, not a return type. A function that can fail declares `! fail` and fails with `fail(kind, msg)`. The error value is `Err { kind: ErrKind, msg: str }`, and `ErrKind` is one of `.Invalid .NotFound .Denied .Conflict .Timeout .Cancelled .Unavailable .Io .Internal`.
 - Every call to a function that can fail must handle the failure:
 
-```
+```ovt
 let n = int.parse(s)?               // pass it on; the caller declares `! fail`
 let n = int.parse(s) else 0         // replace it
 let n = int.parse(s) catch e {      // inspect it; e is an Err
@@ -205,7 +205,7 @@ All code runs in lightweight tasks. An `io` call that waits suspends only its ow
 
 - `par { ... }` runs each top-level statement of the block at the same time and waits for all of them. If one fails, the others are cancelled and the failure passes on. Variables declared inside are usable after the block. The statements can't use each other's variables or change variables from outside.
 
-```
+```ovt
 par {
   let user = db.user(id)?
   let posts = db.posts(id)?
@@ -223,7 +223,7 @@ return render(user, posts)
 
 ## C interop
 
-```
+```ovt
 extern "sqlite3" {                                     // links libsqlite3
   type sqlite3                                         // opaque C types
   type sqlite3_stmt
@@ -239,7 +239,7 @@ extern "z" header "zlib.h"                             // declarations generated
 - C types: `c.int c.uint c.long c.ulong c.size c.char`. Overt structs use C layout.
 - Wrap each C handle in a resource so the rest of the program stays safe:
 
-```
+```ovt
 type Db { raw: *sqlite3 }
 drop Db { unsafe { _ = sqlite3_close(self.raw) } }
 ```

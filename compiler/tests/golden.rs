@@ -1,0 +1,138 @@
+//! Golden tests.
+//!
+//! - `tests/run/x.ovt` runs and must print `x.out`. If `x.stderr` exists, the
+//!   program must trap (exit status 101) with exactly that message.
+//! - `tests/errors/x.ovt` must fail to build with exactly the messages in `x.err`.
+//! - Every test program, and every `ovt` code block in SPEC.md, must come back
+//!   unchanged from `ovt fmt`.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+fn ovt() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_ovt"))
+}
+
+fn tests_dir(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(name)
+}
+
+fn ovt_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ovt"))
+        .collect();
+    files.sort();
+    files
+}
+
+fn read(p: &Path) -> String {
+    std::fs::read_to_string(p).unwrap_or_default()
+}
+
+fn name(p: &Path) -> String {
+    p.file_name().unwrap().to_string_lossy().into_owned()
+}
+
+/// Formats `text` with `ovt fmt -`; `None` if it doesn't parse.
+fn format(text: &str) -> Option<String> {
+    let mut child = ovt().args(["fmt", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    out.status.success().then(|| String::from_utf8(out.stdout).unwrap())
+}
+
+#[test]
+fn programs_print_expected_output() {
+    let dir = tests_dir("run");
+    let mut failures = Vec::new();
+    for f in ovt_files(&dir) {
+        let out = ovt().current_dir(&dir).arg("run").arg(name(&f)).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr_file = f.with_extension("stderr");
+        let (want_err, want_code) = if stderr_file.exists() { (read(&stderr_file), 101) } else { (String::new(), 0) };
+        let want_out = read(&f.with_extension("out"));
+        let code = out.status.code().unwrap_or(-1);
+        if stdout != want_out || stderr != want_err || code != want_code {
+            failures.push(format!(
+                "{}: exit {code} (want {want_code})\n--- stdout\n{stdout}--- want\n{want_out}--- stderr\n{stderr}--- want\n{want_err}",
+                name(&f)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+fn errors_match_expected_messages() {
+    let dir = tests_dir("errors");
+    let mut failures = Vec::new();
+    for f in ovt_files(&dir) {
+        let out = ovt().current_dir(&dir).arg("build").arg(name(&f)).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let want = read(&f.with_extension("err"));
+        if out.status.code() != Some(1) || stderr != want {
+            failures.push(format!("{}: exit {:?}\n--- got\n{stderr}--- want\n{want}", name(&f), out.status.code()));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+fn outlines_match() {
+    let dir = tests_dir("outline");
+    let mut failures = Vec::new();
+    for f in ovt_files(&dir) {
+        let out = ovt().current_dir(&dir).arg("outline").arg(name(&f)).output().unwrap();
+        let got = String::from_utf8_lossy(&out.stdout);
+        let want = read(&f.with_extension("outline"));
+        if !out.status.success() || got != want {
+            failures.push(format!("{}:\n--- got\n{got}--- want\n{want}", name(&f)));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+fn test_programs_are_formatted() {
+    let mut failures = Vec::new();
+    for dir in ["run", "errors", "outline"] {
+        for f in ovt_files(&tests_dir(dir)) {
+            let text = read(&f);
+            // Files written to show a parse error can't be formatted.
+            if let Some(formatted) = format(&text) {
+                if formatted != text {
+                    failures.push(format!("{dir}/{}:\n--- formatted\n{formatted}", name(&f)));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+fn spec_code_blocks_are_canonical() {
+    let spec = read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../SPEC.md"));
+    let mut blocks = Vec::new();
+    let mut rest = spec.as_str();
+    while let Some(start) = rest.find("```ovt\n") {
+        let body = &rest[start + 7..];
+        let end = body.find("```").expect("unclosed code block in SPEC.md");
+        blocks.push(&body[..end]);
+        rest = &body[end + 3..];
+    }
+    assert!(blocks.len() >= 5, "expected the SPEC.md code blocks to be tagged `ovt`");
+    let mut failures = Vec::new();
+    for (i, block) in blocks.iter().enumerate() {
+        match format(block) {
+            None => failures.push(format!("block {i} doesn't parse:\n{block}")),
+            Some(f) if f != *block => failures.push(format!("block {i} isn't canonical:\n--- formatted\n{f}")),
+            Some(_) => {}
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}

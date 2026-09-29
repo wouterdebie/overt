@@ -1,0 +1,10 @@
+fn half(n: int) -> int
+  pre n % 2 == 0
+{
+  return n / 2
+}
+
+fn main() ! io {
+  print(half(4))
+  print(half(3))
+}

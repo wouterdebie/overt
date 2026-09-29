@@ -1,0 +1,1 @@
+naming.ovt:1:4: error: function names are snake_case: rename `addOne` to `add_one`

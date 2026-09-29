@@ -44,7 +44,7 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 | Kind | Layout |
 |---|---|
 | plain | inline, C layout (fields in declared order, C alignment) |
-| `str`, `[T]` | `{buf: *RcBuf, off: i64, len: i64}`, where `RcBuf` is `{rc: i64, flags: u32, cap: i64, data...}` |
+| `str`, `[T]` | `{buf: *RcBuf, off: i64, len: i64}`, where `RcBuf` is a 16-byte header `{rc: i64, cap: i64}` followed by the data. As in Lean 4, `rc > 0` is a count owned by one task, `rc < 0` a shared count updated atomically, and `rc == 0` a static buffer that is never freed (string literals) |
 | `Map`, `Set` | pointer to a reference-counted, insertion-ordered table: a dense entry array plus a hash index, like Python's compact dict |
 | recursive field | pointer to a reference-counted box, inserted by the compiler when the type graph has a cycle |
 | enum | tag plus payload union. `?T` is tag plus `T`; niche optimization comes later |
@@ -89,7 +89,7 @@ The check is static and runs per call. An `inout` argument's access path (`p`, `
 
 A task owns its data. Non-atomic counting is safe even when the scheduler moves a task to another worker thread, because the handoff itself synchronizes.
 
-Data that becomes reachable from more than one task gets its `flags` marked *shared*, Lean 4 style. Count operations on marked buffers use atomics. Marking happens when a value:
+Data that becomes reachable from more than one task is marked *shared* by negating its count, Lean 4 style. Count operations on marked buffers use atomics. Marking happens when a value:
 - is put into a `Shared`, `Chan` or `Atomic`
 - is captured by a `par` statement, `task.map` or `task.group` closure
 - is passed to `g.spawn`
@@ -105,7 +105,7 @@ Marking walks the reachable buffers once and stops at any buffer that's already 
 
 ## Traps
 
-- **v0:** write the message and `file:line:col` (later a backtrace) to stderr, then `abort()`.
+- **v0:** flush stdout, write `file:line:col: trap: message` (later a backtrace) to stderr, and exit with status 101. Not `abort()`: on macOS that triggers a slow crash report for every trap.
 - **Overflow** uses `llvm.*.with.overflow` intrinsics. **Bounds checks** are a compare and a branch to a cold trap block.
 - **Stack overflow** hits the task stack's guard page. A SIGSEGV handler on an alternate signal stack turns it into a trap message.
 - **Later:** a trap fails only its task, using LLVM landing pads for unwinding, so one bad request only kills its connection. This needs a policy for locks poisoned mid-update.
@@ -192,4 +192,4 @@ The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone l
 uvx --with tiktoken python -c "import tiktoken; e = tiktoken.get_encoding('o200k_base'); print(len(e.encode(open('SPEC.md').read())))"
 ```
 
-`o200k_base` is a proxy, since Claude's tokenizer isn't available offline. Treat the number as relative: SPEC.md must stay under 5,000 by this measure. At v0 it's about 4,800.
+`o200k_base` is a proxy, since Claude's tokenizer isn't available offline. Treat the number as relative: SPEC.md must stay under 5,000 by this measure. At v0 it's about 4,900.

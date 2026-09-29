@@ -1,0 +1,13 @@
+// src/main.ovt: counts hits per key over HTTP.
+type Store { hits: Map[str, int] }
+
+type HitCount { key: str, hits: int }
+
+fn main() ! io, fail
+
+// POST /hit/<key> adds a hit; GET /hit/<key> reads the count.
+fn route(req: http.Req, store: Shared[Store]) -> http.Resp ! fail
+
+fn hit(store: Shared[Store], key: str) -> int
+
+fn count(store: Shared[Store], key: str) -> int ! fail

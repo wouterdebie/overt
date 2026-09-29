@@ -1,0 +1,1 @@
+typo.ovt:2:3: error: unknown name `prnt`; did you mean `print(x) ! io`?

@@ -1,0 +1,1 @@
+unused.ovt:6:3: error: the result of this call is unused; use it, or discard it with `_ = ...`

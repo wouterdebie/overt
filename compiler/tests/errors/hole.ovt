@@ -1,0 +1,8 @@
+fn area(w: int, h: int) -> int {
+  let label = "area"
+  return w * _
+}
+
+fn main() ! io {
+  print(area(2, h: 3))
+}

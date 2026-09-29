@@ -1,0 +1,1 @@
+missing_io.ovt:2:3: error: `print` has the `io` effect, so `greet` must declare it too: add `! io` to its signature

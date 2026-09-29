@@ -1,0 +1,36 @@
+// src/main.ovt: counts hits per key over HTTP.
+type Store { hits: Map[str, int] }
+type HitCount { key: str, hits: int }
+
+fn main() ! io, fail {
+  let store = Shared.new(Store(hits: {}))
+  http.serve(":8080", |req| route(req, store))?
+}
+
+// POST /hit/<key> adds a hit; GET /hit/<key> reads the count.
+fn route(req: http.Req, store: Shared[Store]) -> http.Resp ! fail {
+  return match (req.method, req.path_parts()) {
+    ("POST", ["hit", key]) => http.json(200, HitCount(key, hits: hit(store, key)))
+    ("GET", ["hit", key]) => http.json(200, HitCount(key, hits: count(store, key)?))
+    _ => http.text(404, "not found")
+  }
+}
+
+fn hit(store: Shared[Store], key: str) -> int {
+  return lock store as s {
+    s.hits[key] = (s.hits.get(key) else 0) + 1
+    s.hits[key]
+  }
+}
+
+fn count(store: Shared[Store], key: str) -> int ! fail {
+  let n = lock store as s { s.hits.get(key) }
+  return n else fail(.NotFound, "no hits for ${key}")
+}
+
+test "hits count per key" ! fail {
+  let s = Shared.new(Store(hits: {}))
+  assert(hit(s, "a") == 1)
+  assert(hit(s, "a") == 2)
+  assert(count(s, "a")? == 2)
+}

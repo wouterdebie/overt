@@ -1,0 +1,11 @@
+fn greet() ! io {
+  print("hi")
+}
+
+fn run() {
+  greet()
+}
+
+fn main() ! io {
+  run()
+}

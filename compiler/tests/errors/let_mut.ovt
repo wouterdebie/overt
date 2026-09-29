@@ -1,0 +1,4 @@
+fn main() ! io {
+  let mut n = 1
+  print(n)
+}

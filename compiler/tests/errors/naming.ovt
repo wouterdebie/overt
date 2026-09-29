@@ -1,0 +1,7 @@
+fn addOne(n: int) -> int {
+  return n + 1
+}
+
+fn main() ! io {
+  print(addOne(1))
+}

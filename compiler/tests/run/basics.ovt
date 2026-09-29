@@ -1,0 +1,57 @@
+// Recursion, loops, `if` as a value, and a precondition.
+fn fib(n: int) -> int
+  pre n >= 0
+{
+  if n < 2 {
+    return n
+  }
+  return fib(n - 1) + fib(n - 2)
+}
+
+fn sum_to(n: int) -> int {
+  var total = 0
+  for i in 1..=n {
+    total += i
+  }
+  return total
+}
+
+fn collatz_steps(start: int) -> int {
+  var n = start
+  var steps = 0
+  while n != 1 {
+    n = if n % 2 == 0 { n / 2 } else { 3 * n + 1 }
+    steps += 1
+  }
+  return steps
+}
+
+fn clamp(x: int, lo: int, hi: int) -> int {
+  if x < lo {
+    return lo
+  } else if x > hi {
+    return hi
+  }
+  return x
+}
+
+fn main() ! io {
+  print(fib(20))
+  print(sum_to(100))
+  print(collatz_steps(27))
+  print(fib(10) == 55 && sum_to(4) == 10)
+  print(clamp(15, lo: 0, hi: 10))
+  print(-7 / 2)
+  print(1 << 10 | 0xff)
+  print(9223372036854775807 +% 1)
+  for i in 0..4 {
+    if i == 1 {
+      continue
+    }
+    if i == 3 {
+      break
+    }
+    print(i)
+  }
+  print("tab\tand \u{e9}")
+}

@@ -1,0 +1,1 @@
+let_change.ovt:3:3: error: `total` can't change: declare it with `var total = ...`

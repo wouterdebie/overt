@@ -1,0 +1,10 @@
+fn span(start: int, end: int) -> int {
+  return end - start
+}
+
+fn main() ! io {
+  let start = 2
+  let end = 9
+  print(span(start, end))
+  print(span(end, start))
+}
