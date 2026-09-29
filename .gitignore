@@ -1,0 +1,25 @@
+# Rust build output (the compiler, and Rust versions of benchmark tasks)
+target/
+
+# Overt build output (`ovt build` writes here, inside each package)
+.ovt/
+
+# Go build output for benchmark tasks
+tasks/*/go/bin/
+
+# Benchmark run artifacts: transcripts and raw measurements
+bench/runs/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Local tooling
+.env
+.claude/settings.local.json
+.claude/worktrees/
+graphify-out/
