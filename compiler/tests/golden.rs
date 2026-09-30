@@ -77,7 +77,9 @@ fn errors_match_expected_messages() {
     let dir = tests_dir("errors");
     let mut failures = Vec::new();
     for f in ovt_files(&dir) {
-        let out = ovt().current_dir(&dir).arg("build").arg(name(&f)).output().unwrap();
+        // `ex` lines are only checked by `ovt test`.
+        let cmd = if name(&f).starts_with("ex_") { "test" } else { "build" };
+        let out = ovt().current_dir(&dir).arg(cmd).arg(name(&f)).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         let want = read(&f.with_extension("err"));
         if out.status.code() != Some(1) || stderr != want {

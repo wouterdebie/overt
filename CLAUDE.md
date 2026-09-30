@@ -12,4 +12,4 @@
 
   Read the new output before regenerating a golden file.
 - A feature the compiler doesn't implement yet must fail with a "not supported by this compiler yet" error, never a crash or wrong code.
-- Task programs in `tasks/*/overt` are written by fresh agents that see only SPEC.md, the task and `ovt` (see ROADMAP.md). Don't write them yourself; `00-hello` is the only exception.
+- Task programs in `tasks/*/overt` are written by fresh agents that see only SPEC.md and the std outline (in their prompt), the task and `ovt` (see ROADMAP.md). Don't write them yourself; `00-hello` is the only exception.

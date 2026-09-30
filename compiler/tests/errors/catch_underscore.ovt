@@ -1,0 +1,4 @@
+fn main() ! io {
+  let n = int.parse("5") catch _ { 0 }
+  print(n)
+}

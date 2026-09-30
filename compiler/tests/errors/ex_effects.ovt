@@ -1,0 +1,18 @@
+// An `ex` line may fail, but not use `io`, and nested failures need `?`.
+fn loud(s: str) -> int ! io
+  ex loud("a") == 1
+{
+  print(s)
+  return 1
+}
+
+fn count(s: str) -> int ! fail
+  ex count("1") + count("2") == 3
+  ex count("1")? + count("2")? == 3
+{
+  return int.parse(s)?
+}
+
+fn main() ! io {
+  print(loud("b"))
+}

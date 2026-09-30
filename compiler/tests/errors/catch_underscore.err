@@ -1,0 +1,1 @@
+catch_underscore.ovt:2:32: error: `catch` needs a name for the error, like `catch e { ... }`; to handle a failure without looking at the error, use `else`: `f() else { ... }`

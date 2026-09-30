@@ -51,5 +51,4 @@ Examples:
 
 ## Testing
 
-- `python3 tests/run.py <command>` runs the program with `<command>` on each test case.
-- `python3 tests/perf.py <command>` times it on a generated document of about 50 MB and checks the result. The first run generates the file into `tests/data/`.
+`python3 tests/run.py <command>` runs the program with `<command>` on each test case.

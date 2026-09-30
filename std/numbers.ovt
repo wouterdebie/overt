@@ -5,6 +5,7 @@
 fn int.parse(s: str) -> int ! fail
   ex int.parse("42") == 42
   ex int.parse("-7") == -7
+  ex int.parse("4")? * 2 == 8
   ex int.parse("4x") fails .Invalid
   ex int.parse("") fails .Invalid
 

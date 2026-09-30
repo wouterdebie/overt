@@ -113,7 +113,8 @@ Marking walks the reachable buffers once and stops at any buffer that's already 
 - Effects are checked by the type checker and erased in codegen.
 - A failable function returns `{i1 failed, T, Err}`, where `Err` is the prelude struct `{kind: ErrKind, msg: str}`. `?` is a branch that returns the error, dropping everything in scope. `else` and `catch` are branches to the handler.
 - A failing `main` prints `error: <msg>` and exits with status 1.
-- In an `ex` line, the outermost call on each side may fail without `?`; a failure fails the example.
+- Std failure messages say what failed and on what: `can't read <path>: <reason>`, with the whole path. Callers pass them on with `?` and don't add the path again.
+- In an `ex` line, the outermost call on each side may fail without `?`; a failure fails the example. Calls inside it that can fail need `?` as usual. Only `io` is ruled out, so examples don't depend on the outside world. (Until the wordfreq benchmark, `ex` lines also ruled out failing inside calls, and agents made their functions trap to get around it.)
 - Effect parameters (`!E`) are monomorphized per call site, like type parameters. Inside the generic body, calling an `E`-typed function passes failure on implicitly, since the body can't know whether `E` contains `fail`. After monomorphization with an `E` without `fail`, that branch disappears.
 - Standard higher-order functions (`map`, `filter`, `task.map`, ...) are declared with effect parameters.
 
@@ -220,7 +221,95 @@ The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone l
   - `ovt outline task` said there's no such module. It now says the module is planned for milestone 2.
   - The named-argument rule cost one round (`ranks_before(a, b)`, both `WordCount`). It's working as intended: that is exactly the swap it exists to catch.
 
+### `wordfreq` in Overt and Rust, three runs each (protocol v2, milestone 1)
+
+- **Result:** all six programs passed all 19 tests on their first build. Neither language had a failed build. Medians:
+
+  | | Overt | Rust |
+  |---|---|---|
+  | tool calls (to first pass) | 8 (6) | 3 (3) |
+  | input tokens (to first pass) | 270k (135k) | 117k (86k) |
+  | output tokens | 3.3k | 1.9k |
+  | cost | $0.30 | $0.14 |
+  | 100 MB | 0.90 s | 0.55 s (fastest run 0.34 s) |
+
+- **Where Overt's extra cost goes:**
+  - **Learning the language:** reading SPEC.md and outlining four to seven std modules takes two or three extra calls, and adds about 12k tokens that every later call reads again.
+  - **Polishing after the tests pass:** the Overt agents went on to run `ovt test` and `ovt fmt` and to try error cases by hand, which took two or three more calls. The Rust agents replied DONE as soon as the tests passed.
+
+  The learning cost is fixed, so it dominates a task this small. The tasks from milestone 3 on are the ones that test the hypothesis.
+- **Stumble: the path appears twice in the error message.** `fs.read_bytes` fails with `can't read <path>: <reason>`, and every agent wrapped it the way it would in Rust or Go, as `can't read ${path}: ${e.msg}`. Two agents noticed the doubled path when they tried a missing file and fixed it. The third shipped it, because the tests don't check what stderr says.
+  - **Fixed since:** SPEC.md says that std failures already name what failed, and that callers should pass them on with `?`.
+  - **Found while fixing it:** a file error with a path over about 1,170 bytes read past a 1,200-byte stack buffer. `snprintf` returns the untruncated length, and the runtime copied that many bytes. These messages are now built by appending their parts, with no length limit, and the `fs_errors` golden test covers them.
+- **Speed:** all three programs count words with the idiom the pilot used. For each word, that idiom:
+  - makes a `str` from a reused `[u8]` buffer, which means a UTF-8 check plus a new allocation when the buffer is next written
+  - then runs `m[k] = (m.get(k) else 0) + 1`, which looks the key up twice
+
+  The fastest Rust version looks the word up by slice, and allocates only for new words.
+
+### `wordfreq` with the docs in the prompt (protocol v3, milestone 1)
+
+- **Setup:** the model already knows Rust and Go, so Overt's docs go in the prompt, the way a CLAUDE.md would load them. There are two variants:
+  - `overt` gets SPEC.md.
+  - `overt-std` gets SPEC.md plus the outline of every std module.
+
+  Each ran three times, and Rust ran again. All nine programs passed all 19 tests. Medians:
+
+  | | `overt` | `overt-std` | Rust |
+  |---|---|---|---|
+  | tool calls (to first pass) | 5 (4) | 4 (2) | 3 (3) |
+  | input tokens (to first pass) | 242k (155k) | 211k (81k) | 118k (86k) |
+  | output tokens | 2.0k | 1.9k | 1.9k |
+  | cost | $0.27 | $0.26 | $0.14 |
+  | docs: tokens, share of input | 12.3k, 26% | 11.8k, 28% | 0 |
+  | 100 MB | 0.84 s | 0.73 s | 0.52 s |
+
+- **The std outline is what saves steps:**
+  - With the outline in the prompt, the agents wrote the program before looking anything up. They reached passing tests in fewer steps and tokens than Rust.
+  - With only the spec, they still spent two steps on `ovt outline`. The spec alone saves nothing, because in v2 the agents read it in the same step as other files.
+- **The cost gap is the one-time cache write:** a fresh agent writes its docs, about 12k tokens, into the prompt cache once.
+  - Overt runs write 21–24k tokens to the cache, against Rust's 9.3k.
+  - At the prices these runs imply, the extra 12k is about $0.10 of the $0.12 difference.
+  - Cache reads grow with every step but cost little.
+
+  So learning Overt costs something per session, not per step, and a long session pays it once.
+- **Since then:** from protocol v4 on, `overt` in the benchmark means SPEC.md plus the std outline in the prompt; `overt-spec` is the spec alone.
+- **Checking after the pass:** the agents still took one or two more steps after the tests passed (`ovt test`, `ovt fmt`, an error case). The Rust agents didn't.
+- **The error-message line in SPEC.md worked:** all six programs pass the file error on with `?`, and none of them prints the path twice.
+- **Stumbles:**
+  - `catch _ { ... }` to ignore the error: one run, one failed build. The message asks for a name, but doesn't say that `else` is the way to handle a failure without looking at it. **Fixed since:** the message now points to `else`.
+  - An `ex` line with a failable call inside it, `ex count_words(b)?.get("b") == 2`: one run, and the same happened in v2. SPEC.md says `ex` lines may only call pure functions, yet its own example `ex parse("ab") fails .Invalid` calls one that can fail. The checker allows failure only in the outermost call. Both agents made the function trap instead, which is worse code written to satisfy the rule. **Fixed since:** an `ex` line may call functions that fail, anywhere in it, and only `io` is ruled out.
+
+### `jsonfmt` in Overt, Rust and Go, three runs each (protocol v4, milestone 1)
+
+- **Result:** all nine programs passed all 45 tests. One Overt run had two failed builds; no other run had any. Medians:
+
+  | | Overt | Rust | Go |
+  |---|---|---|---|
+  | tool calls (to first pass) | 8 (6) | 6 (3) | 3 (3) |
+  | input tokens (to first pass) | 461k (289k) | 252k (92k) | 129k (92k) |
+  | output tokens | 9.9k | 5.8k | 3.6k |
+  | of which thinking, roughly | 7k | 2.8k | 1.1k |
+  | cost | $0.55 | $0.32 | $0.21 |
+  | program, code only (o200k tokens) | 1.7k | 1.8k | 1.7k |
+  | 50 MB | 0.43 s | 0.12 s | 0.21 s |
+
+  "Thinking" is output tokens minus the code and text the agent wrote. The transcripts hide the thinking itself, and the estimate counts the visible part with `o200k_base`, so it's rough.
+- **Where Overt's extra cost goes:**
+  - **The docs:** writing them to the cache costs about $0.11 per run, as in wordfreq.
+  - **Thinking:** the Overt agents thought two to three times as much as the Rust agents, and six times as much as the Go agents. Output tokens are the most expensive kind, so at the rates these runs imply that's about $0.08–0.12 more than Rust. There was no such gap on wordfreq. The extra deliberation grows with the size of the program, so it isn't a fixed cost.
+  - **Steps:** the tests first passed after 4–9 tool calls, against 3 for every Rust and Go run.
+- **Programs aren't shorter:** without comments and `ex` lines, the Overt programs are about the size of Go's and a little under Rust's. In wordfreq they were about a third smaller than Rust's. A byte-level parser gives the language little to save. The Overt programs also carry twice the comments, plus examples.
+- **What this says about the hypothesis:**
+  - Correctness can't separate the languages on these tasks: Rust and Go agents pass on their first build too.
+  - What the tasks do measure is Overt's learning cost, which is now two parts: the docs, fixed per session, and extra thinking, which grows with the program.
+  - Fewer compile-fix rounds can only show up where Rust and Go agents actually need rounds: concurrency and shared state, from milestone 2 on.
+- **Stumble:** a helper `fn Parser.bad(self, what: str) -> never ! fail` that always fails, called without `?` (one run, two failed builds). The rule is consistent, since every call that can fail is handled, but the agent then replaced every call with an inline `fail(...)`, and its regex broke the parentheses.
+- **Speed:** Overt is 3.5 times slower than Rust here, and about twice as slow as Go. The reference Overt version takes 0.37 s.
+
 ## Open questions
+
+- Why do agents think two to three times as much when writing Overt, and does the spec's shape (more examples, fewer rules) change that?
 
 - Should a trap stop only its task? That needs unwinding and a policy for poisoned locks.
 - `select` over channels. v0 avoids it with separate reader and writer tasks per connection.
@@ -245,4 +334,10 @@ The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone l
 uvx --with tiktoken python -c "import tiktoken; e = tiktoken.get_encoding('o200k_base'); print(len(e.encode(open('SPEC.md').read())))"
 ```
 
-`o200k_base` is a proxy, since Claude's tokenizer isn't available offline. Treat the number as relative: SPEC.md must stay under 5,000 by this measure. After milestone 1 it's about 4,900.
+`o200k_base` is a proxy, since Claude's tokenizer isn't available offline. Treat the number as relative: SPEC.md must stay under 5,000 by this measure. After milestone 1 it's about 4,950.
+
+Agents also get the outline of every std module in their prompt (see the benchmark findings), so its size counts too. It has no cap yet. After milestone 1 it's about 3,200 by the same measure:
+
+```
+for m in prelude array collections fs log math numbers os str; do ovt outline $m; echo; done | uvx --with tiktoken python -c "import sys, tiktoken; print(len(tiktoken.get_encoding('o200k_base').encode(sys.stdin.read())))"
+```

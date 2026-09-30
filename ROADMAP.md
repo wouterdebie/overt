@@ -11,18 +11,18 @@ The goals are a ladder of programs. Each one needs a new layer of the compiler o
 | 4 | HTTP JSON API | `http`, automatic JSON, error kinds as status codes |
 | 5 | The same API on sqlite | C interop and blocking calls |
 | 6 | Redis-compatible server | All of the above in one real server |
-| 7 | `ovt` written in Overt | A large codebase maintained by agents |
+|                        7 | `ovt` written in Overt | A large codebase maintained by agents |
 
 ## How each milestone runs
 
 1. **Task first.** Write `tasks/<nn>-<name>/README.md`, a task description that doesn't depend on the language, plus black-box tests in `tasks/<nn>-<name>/tests/`. The tests talk only to the built program (arguments and output, TCP, HTTP), so the same suite runs against the Overt, Rust and Go versions. Both are written before any Overt code for the milestone.
 2. **Build the layer.** Add the compiler, runtime and standard library work the milestone lists under *Needs*.
-3. **A fresh agent writes the program.** It works in a directory that holds only SPEC.md, the task README, the tests and `ovt` on the PATH. It never sees the compiler's source, because the experiment is whether the language can be learned from the spec, not whether the agent that built the compiler can use it.
+3. **A fresh agent writes the program.** SPEC.md and the outline of the standard library are in its prompt, the way a CLAUDE.md would load them, since the model already knows Rust and Go. It works in a directory that holds only the task README, the tests and `ovt` on the PATH. It never sees the compiler's source, because the experiment is whether the language can be learned from the spec, not whether the agent that built the compiler can use it.
 4. **Log everything.** Record the numbers under *What we measure*. Sort every stumble into one of three causes, and fix it in the matching place:
    - a gap in the spec: fix SPEC.md
    - a compiler bug: fix the compiler
    - a design flaw: fix DESIGN.md, then SPEC.md
-5. **Benchmark (milestones 1–6).** Fresh agents get the same README and tests for Rust and Go, with their normal toolchains. Every task runs at least 3 times per language, because agent runs vary.
+5. **Benchmark (milestones 1–6).** Fresh agents get the same README and tests for Rust and Go, with their normal toolchains. Every task runs at least 3 times per language, because agent runs vary. The report shows what learning Overt costs on its own: the tokens of docs an agent had, and the share of its input spent carrying them. Those tokens are a real cost that Rust and Go don't pay, so they're counted, but separately from the cost of writing the program.
 
 A milestone is done when its *Done when* list holds and the benchmark numbers are recorded. Overt doesn't have to win: a loss is a finding, and it goes into DESIGN.md.
 

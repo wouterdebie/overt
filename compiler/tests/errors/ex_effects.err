@@ -1,0 +1,3 @@
+ex_effects.ovt:3:6: error: an `ex` line can't use `io`, but `loud` has the `io` effect
+ex_effects.ovt:10:6: error: `count` can fail; handle it with `?`, `else` or `catch`
+ex_effects.ovt:10:19: error: `count` can fail; handle it with `?`, `else` or `catch`

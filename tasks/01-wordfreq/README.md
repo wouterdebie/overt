@@ -18,5 +18,4 @@ Print a message to stderr, print nothing to stdout, and exit with status 1 when:
 
 ## Testing
 
-- `python3 tests/run.py <command>` runs the program with `<command>` on each test case.
-- `python3 tests/perf.py <command>` times it on a generated file of about 100 MB and checks the result. The first run generates the file into `tests/data/`.
+`python3 tests/run.py <command>` runs the program with `<command>` on each test case.

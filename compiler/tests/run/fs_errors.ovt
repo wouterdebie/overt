@@ -1,0 +1,22 @@
+// File errors name the whole path and the reason, however long the path.
+fn describe(path: str) -> str ! io {
+  let data = fs.read_bytes(path) catch e { return e.msg }
+  return "read ${data.len()} bytes"
+}
+
+fn describe_write(path: str) -> str ! io {
+  fs.write(path, data: "x") catch e { return e.msg }
+  return "wrote ${path}"
+}
+
+fn main() ! io {
+  print(describe("no/such/dir/a.txt"))
+  print(describe_write("no/such/dir/a.txt"))
+  for n in [2000, 5000] {
+    let path = "d".repeat(n)
+    let read = describe(path)
+    let write = describe_write(path)
+    print("${read.len()} ${read.starts_with("can't read ddd")} ${read.ends_with("d: File name too long")}")
+    print("${write.len()} ${write.starts_with("can't write ddd")} ${write.ends_with("d: File name too long")}")
+  }
+}

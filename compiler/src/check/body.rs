@@ -57,8 +57,10 @@ pub struct FnCx {
     pub infer: Infer,
     pub obligations: Vec<Obligation>,
     pub closures: Vec<ClosureId>,
-    /// Constants, defaults and `ex` lines: no effects allowed.
+    /// Constants, defaults and `ex` lines: no effects allowed, except
+    /// that `ex` lines may fail (`fail_ok`).
     pub pure_only: bool,
+    pub fail_ok: bool,
     /// How many errors existed before this function was checked; if it adds
     /// any, "can't tell the type" is left out as a likely consequence.
     pub errors_before: usize,
@@ -66,7 +68,7 @@ pub struct FnCx {
 
 impl FnCx {
     pub fn new(file: FileId, owner: FnId, generics: Vec<GenericDef>) -> FnCx {
-        FnCx { file, owner, generics, frames: Vec::new(), infer: Infer::default(), obligations: Vec::new(), closures: Vec::new(), pure_only: false, errors_before: 0 }
+        FnCx { file, owner, generics, frames: Vec::new(), infer: Infer::default(), obligations: Vec::new(), closures: Vec::new(), pure_only: false, fail_ok: false, errors_before: 0 }
     }
 
     pub fn frame(&mut self) -> &mut Frame {
@@ -199,6 +201,7 @@ impl<'a> Checker<'a> {
         let text = self.src(file).slice(ex.span).to_string();
         let mut cx = FnCx::new(file, usize::MAX, Vec::new());
         cx.pure_only = true;
+        cx.fail_ok = true;
         cx.frames.push(Frame::new("an `ex` line".into(), Ty::Unit, Some(Eff { fail: true, ..Eff::pure() })));
         let span = ex.span;
         let t = match &ex.fails {
@@ -473,7 +476,12 @@ impl<'a> Checker<'a> {
     /// Records effects used at `span`: closures collect them, functions must declare them.
     pub fn use_effects(&mut self, cx: &mut FnCx, eff: &Eff, span: Span, callee: &str) {
         let eff = cx.infer.resolve_eff(eff);
-        if cx.pure_only && (eff.io || eff.fail) {
+        if cx.pure_only && cx.fail_ok && eff.io {
+            let what = cx.fr().name.clone();
+            self.err(cx.file, span, format!("{what} can't use `io`, but `{callee}` has the `io` effect"));
+            return;
+        }
+        if cx.pure_only && !cx.fail_ok && (eff.io || eff.fail) {
             let what = cx.fr().name.clone();
             self.err(cx.file, span, format!("{what} must be pure, but `{callee}` has effects"));
             return;

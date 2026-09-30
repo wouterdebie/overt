@@ -602,10 +602,14 @@ _Noreturn void ovt_os_exit(int64_t status) {
   exit((int)status);
 }
 
+// "<what> <path>: <reason>", with the whole path.
 static void err_msg(ovt_str *err, const char *what, const ovt_str *path, int e) {
-  char buf[1200];
-  int n = snprintf(buf, sizeof buf, "%s %.*s: %s", what, (int)(path ? path->len : 0), path ? sdata(path) : "", strerror(e));
-  str_from(err, buf, n);
+  const char *reason = strerror(e);
+  str_from(err, what, (int64_t)strlen(what));
+  ovt_str_append_bytes(err, " ", 1);
+  ovt_str_append_bytes(err, sdata(path), path->len);
+  ovt_str_append_bytes(err, ": ", 2);
+  ovt_str_append_bytes(err, reason, (int64_t)strlen(reason));
 }
 
 static int32_t kind_of_errno(int e) {
@@ -642,7 +646,7 @@ static int32_t read_fd(int fd, ovt_arr *out) {
 int32_t ovt_fs_read(const ovt_str *path, ovt_arr *out, int32_t want_text, ovt_str *err) {
   char p[4096];
   if (path->len >= (int64_t)sizeof p) {
-    str_from(err, "path too long", 13);
+    err_msg(err, "can't read", path, ENAMETOOLONG);
     return K_INVALID + 1;
   }
   memcpy(p, sdata(path), (size_t)path->len);
@@ -663,9 +667,9 @@ int32_t ovt_fs_read(const ovt_str *path, ovt_arr *out, int32_t want_text, ovt_st
   close(fd);
   if (want_text && !utf8_valid((const unsigned char *)sdata(out), out->len)) {
     ovt_buf_release(out->buf, 1, NULL);
-    char buf[1200];
-    int n = snprintf(buf, sizeof buf, "%.*s isn't valid UTF-8 text; read it with fs.read_bytes", (int)path->len, sdata(path));
-    str_from(err, buf, n);
+    const char *m = " isn't valid UTF-8 text; read it with fs.read_bytes";
+    str_from(err, sdata(path), path->len);
+    ovt_str_append_bytes(err, m, (int64_t)strlen(m));
     return K_INVALID + 1;
   }
   return 0;
@@ -687,7 +691,7 @@ int32_t ovt_read_stdin(ovt_arr *out, int32_t want_text, ovt_str *err) {
 int32_t ovt_fs_write(const ovt_str *path, const ovt_str *data, ovt_str *err) {
   char p[4096];
   if (path->len >= (int64_t)sizeof p) {
-    str_from(err, "path too long", 13);
+    err_msg(err, "can't write", path, ENAMETOOLONG);
     return K_INVALID + 1;
   }
   memcpy(p, sdata(path), (size_t)path->len);

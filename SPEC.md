@@ -116,7 +116,7 @@ fn parse(line: str) -> Entry ! fail
 
 - The signature is the whole contract: parameters, return type, and effects after `!`. Without `->` a function returns nothing. Types are inferred only inside bodies.
 - Return values with `return`. `if`, `match`, `else`, `catch` and `lock` blocks used as values yield their last line.
-- `pre cond` traps on entry if false. `ex` lines are examples that `ovt test` runs: `ex <bool expr>`, `ex <call> fails`, `ex <call> fails .Kind`. They may only call pure functions.
+- `pre cond` traps on entry if false. `ex` lines are examples that `ovt test` runs: `ex <bool expr>`, `ex <call> fails`, `ex <call> fails .Kind`. They can't use `io`. A failure fails the example; inner calls that can fail need `?`.
 - Parameters may have defaults: `fn get(url: str, retries: int = 3)`.
 - Named arguments: inside the parentheses, when two or more arguments go to parameters of the same type, name all but the first of them: `copy(a, dst: b)`, `s.replace("a", new: "b")`. Any argument may be named. Named arguments come after positional ones, in any order.
 - A call's result must be used: `s.trim()` alone on a line is an error. Discard with `_ = f()`.
@@ -189,6 +189,7 @@ let n = int.parse(s) catch e {      // inspect it; e is an Err
 
 - When a call can fail and also returns `?T`, `else` handles the failure; `f()? else x` handles the `none`.
 - A failing `main` prints `error: <msg>` to stderr and exits with status 1.
+- Std failures already say what failed, like `can't read a.txt: No such file or directory`. Pass them on with `?`; don't add the path again.
 - `trap(msg)`, `assert(cond)`, `assert(cond, msg)` and `todo()` stop the program. They're for bugs, not expected errors.
 - `dbg(x)` prints `x` to stderr and returns it. It's allowed in pure code, and its result may be ignored.
 

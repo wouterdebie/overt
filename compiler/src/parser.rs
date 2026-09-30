@@ -825,6 +825,9 @@ impl<'a> Parser<'a> {
                 }
                 Tok::Ident(w) if w == "catch" && min <= PREC_ELSE => {
                     self.bump();
+                    if self.at(P::Underscore) {
+                        return Err(self.err_here("`catch` needs a name for the error, like `catch e { ... }`; to handle a failure without looking at the error, use `else`: `f() else { ... }`"));
+                    }
                     let name = self.ident("a name for the error, like `catch e { ... }`")?;
                     let body = self.block()?;
                     let span = lhs.span.to(body.span);
