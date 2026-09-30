@@ -1,9 +1,11 @@
 //! Functions, closures and statements.
 //!
 //! Cleanup: owned values that need dropping (locals and statement temporaries)
-//! are registered on a stack of scopes. Leaving a scope normally drops its
-//! entries; `return`, failure, `break` and `continue` drop every scope they
-//! leave. Locals live in `alloca` slots, which clang turns into registers.
+//! are registered on a stack of scopes, as are the unlocks of `lock` blocks.
+//! Leaving a scope normally runs its entries; `return`, failure, `break` and
+//! `continue` run every scope they leave. A resource local has a drop flag,
+//! cleared when its value moves away. Locals live in `alloca` slots, which
+//! clang turns into registers.
 
 use super::*;
 use crate::ast::Mode;
@@ -28,10 +30,25 @@ pub struct Fx {
     pub ret: Ty,
     pub failable: bool,
     pub file: FileId,
+    /// The drop flag of each resource local, by its slot: set while the
+    /// local holds a value, cleared when the value moves away.
+    pub flags: HashMap<String, String>,
+}
+
+/// What leaving a scope does.
+#[derive(Clone)]
+pub enum Cleanup {
+    /// Drops the value at the pointer.
+    Drop(String, Ty),
+    /// Drops the value at the second pointer if the `i1` flag at the first is
+    /// set: a resource that may have been moved away.
+    DropIf(String, String, Ty),
+    /// Unlocks the `ovt_shared` at the pointer: the end of a `lock` block.
+    Unlock(String),
 }
 
 pub struct Scope {
-    pub drops: Vec<(String, Ty)>,
+    pub drops: Vec<Cleanup>,
     /// A block's scope (holds locals), as opposed to a statement's temporaries.
     pub block: bool,
 }
@@ -180,30 +197,61 @@ impl<'p> Gen<'p> {
     pub fn pop_scope(&mut self) {
         let s = self.f.scopes.pop().unwrap();
         if !self.f.terminated {
-            for (p, ty) in s.drops.iter().rev() {
-                self.drop_ptr(p, ty);
+            for c in s.drops.iter().rev() {
+                self.run_cleanup(c);
             }
+        }
+    }
+
+    fn run_cleanup(&mut self, c: &Cleanup) {
+        match c {
+            Cleanup::Drop(p, ty) => self.drop_ptr(p, ty),
+            Cleanup::DropIf(flag, p, ty) => {
+                let live = self.load("i1", flag);
+                let (p, ty) = (p.clone(), ty.clone());
+                self.when(&live.repr, |g| g.drop_ptr(&p, &ty));
+            }
+            Cleanup::Unlock(env) => self.inst(&format!("call void @ovt_shared_unlock(ptr {env})")),
         }
     }
 
     pub fn add_drop(&mut self, ptr: &str, ty: &Ty) {
         if self.needs_rc(ty) {
-            self.f.scopes.last_mut().unwrap().drops.push((ptr.to_string(), ty.clone()));
+            self.f.scopes.last_mut().unwrap().drops.push(Cleanup::Drop(ptr.to_string(), ty.clone()));
         }
+    }
+
+    pub fn add_cleanup(&mut self, c: Cleanup) {
+        self.f.scopes.last_mut().unwrap().drops.push(c);
     }
 
     pub fn add_local_drop(&mut self, ptr: &str, ty: &Ty) {
+        if self.is_resource(ty) {
+            // A resource may move away, so its drop checks a flag.
+            let flag = match self.f.flags.get(ptr) {
+                Some(f) => f.clone(),
+                None => {
+                    let f = self.alloca("i1");
+                    self.f.flags.insert(ptr.to_string(), f.clone());
+                    f
+                }
+            };
+            self.inst(&format!("store i1 true, ptr {flag}"));
+            let s = self.f.scopes.iter_mut().rev().find(|s| s.block).unwrap();
+            s.drops.push(Cleanup::DropIf(flag, ptr.to_string(), ty.clone()));
+            return;
+        }
         if self.needs_rc(ty) {
             let s = self.f.scopes.iter_mut().rev().find(|s| s.block).unwrap();
-            s.drops.push((ptr.to_string(), ty.clone()));
+            s.drops.push(Cleanup::Drop(ptr.to_string(), ty.clone()));
         }
     }
 
-    /// Drops everything in scopes `depth..`, innermost first, without leaving them.
+    /// Runs the cleanups of scopes `depth..`, innermost first, without leaving them.
     pub fn cleanup_from(&mut self, depth: usize) {
-        let entries: Vec<(String, Ty)> = self.f.scopes[depth..].iter().rev().flat_map(|s| s.drops.iter().rev().cloned()).collect();
-        for (p, ty) in entries {
-            self.drop_ptr(&p, &ty);
+        let entries: Vec<Cleanup> = self.f.scopes[depth..].iter().rev().flat_map(|s| s.drops.iter().rev().cloned()).collect();
+        for c in entries {
+            self.run_cleanup(&c);
         }
     }
 
@@ -888,7 +936,19 @@ impl<'p> Gen<'p> {
                 }
                 let p = self.place_ptr(place, true);
                 let lt = self.lty(&ty);
-                if self.needs_rc(&ty) {
+                let flag = match place {
+                    TPlace::Local(id) => self.f.flags.get(&self.f.slots[*id]).cloned(),
+                    _ => None,
+                };
+                if let Some(flag) = flag {
+                    // A resource local: drop what it holds, if it still holds it.
+                    let live = self.load("i1", &flag);
+                    let old = self.load(&lt, &p);
+                    let tyc = ty.clone();
+                    self.when(&live.repr, |g| g.drop_value(&old, &tyc));
+                    self.inst(&format!("store {}, ptr {p}", v.op()));
+                    self.inst(&format!("store i1 true, ptr {flag}"));
+                } else if self.needs_rc(&ty) {
                     let old = self.load(&lt, &p);
                     self.inst(&format!("store {}, ptr {p}", v.op()));
                     self.drop_value(&old, &ty);

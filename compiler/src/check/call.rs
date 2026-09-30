@@ -432,8 +432,11 @@ impl<'a> Checker<'a> {
             if let Some(&f) = scope.fns.get(&name.name) {
                 return self.call_fn(cx, f, None, args, span, want, None);
             }
-            if let Some(TypeRef::Adt(id)) = scope.types.get(&name.name).cloned() {
-                return self.construct(cx, id, None, args, span, want);
+            match scope.types.get(&name.name).cloned() {
+                Some(TypeRef::Adt(id)) => return self.construct(cx, id, None, args, span, want),
+                // A number type under another name, like `ffi.int(n)`.
+                Some(TypeRef::Alias(t)) if t.is_numeric() => return self.convert(cx, t, args, span),
+                _ => {}
             }
             if let Some((_, _, ms)) = LATER_FNS.iter().find(|(mm, f, _)| *mm == m && *f == name.name) {
                 // The arguments aren't checked: they'd only add follow-on errors.
@@ -616,6 +619,13 @@ impl<'a> Checker<'a> {
             .collect();
         let ret = def.ret.subst(&targs, &eargs);
         let eff = def.eff.subst(&eargs);
+        let c_call = def.ext.is_some();
+        if def.is_unsafe && cx.unsafe_depth == 0 {
+            let what = if c_call { "a C function" } else { "an `unsafe fn`" };
+            let other = !self.files[def.file].open && def.module != self.files[file].module && !c_call;
+            let shown = if other { format!("{}.{fname}", def.module) } else { fname.clone() };
+            self.err(file, span, format!("`{shown}` is {what}; call it inside `unsafe {{ ... }}`"));
+        }
         let mut out = Vec::new();
         if let Some(r) = recv {
             let p0 = params.remove(0);
@@ -637,7 +647,7 @@ impl<'a> Checker<'a> {
                 cx.infer.unify(&ret, w);
             }
         }
-        let Some(slots) = self.match_args(cx, &fname, &text, &params, args, span) else {
+        let Some(slots) = self.match_args(cx, &fname, &text, &params, args, span, c_call) else {
             for a in args {
                 self.expr(cx, &a.value, None);
             }
@@ -645,7 +655,7 @@ impl<'a> Checker<'a> {
         };
         for (p, slot) in params.iter().zip(slots) {
             match slot {
-                Some(a) => out.push(self.check_arg(cx, &fname, p, a)),
+                Some(a) => out.push(self.check_arg(cx, &fname, p, a, c_call)),
                 None => {
                     let mut d = p.default.clone().expect("match_args checked defaults");
                     d.span = span;
@@ -659,8 +669,20 @@ impl<'a> Checker<'a> {
         TExpr { kind: TK::Call { f, targs, eargs, args: out }, ty: ret, span }
     }
 
-    fn check_arg(&mut self, cx: &mut FnCx, fname: &str, p: &PInfo, a: &Arg) -> TArg {
+    fn check_arg(&mut self, cx: &mut FnCx, fname: &str, p: &PInfo, a: &Arg, c_call: bool) -> TArg {
         let file = cx.file;
+        // `inout x` for a C pointer parameter passes the address of `x`.
+        if c_call && a.inout {
+            if let Ty::Ptr(inner) = &p.ty {
+                let t = self.expr(cx, &a.value, Some(inner));
+                if !cx.infer.unify(&t.ty, inner) {
+                    let msg = format!("argument `{}` of `{fname}` points to `{}`, so `inout` needs a `{}`, but this is `{}`", p.name, self.show(cx, inner), self.show(cx, inner), self.show(cx, &t.ty));
+                    self.err(file, t.span, msg);
+                }
+                self.to_place(cx, &t, "an `inout` argument");
+                return TArg { mode: Mode::Inout, expr: t, copy: false };
+            }
+        }
         if p.mode == Mode::Inout {
             let t = self.expr(cx, &a.value, Some(&p.ty));
             if !a.inout {
@@ -689,7 +711,7 @@ impl<'a> Checker<'a> {
     /// Puts arguments in parameter order: positional first, then named in
     /// any order, defaults for the rest. Where parameters share a type, all
     /// but the first of their arguments must be named.
-    fn match_args<'e>(&mut self, cx: &mut FnCx, fname: &str, text: &str, params: &[PInfo], args: &'e [Arg], span: Span) -> Option<Vec<Option<&'e Arg>>> {
+    fn match_args<'e>(&mut self, cx: &mut FnCx, fname: &str, text: &str, params: &[PInfo], args: &'e [Arg], span: Span, c_call: bool) -> Option<Vec<Option<&'e Arg>>> {
         let file = cx.file;
         let mut slots: Vec<Option<&Arg>> = vec![None; params.len()];
         let mut positional = 0;
@@ -737,6 +759,10 @@ impl<'a> Checker<'a> {
         }
         if !ok {
             return None;
+        }
+        // C functions are called the C way, by position.
+        if c_call {
+            return Some(slots);
         }
         for i in 0..params.len() {
             let Some(a) = slots[i] else { continue };

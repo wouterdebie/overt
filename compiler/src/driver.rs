@@ -5,7 +5,7 @@ use crate::diag::Diag;
 use crate::lexer::{self, Comment};
 use crate::parser::{self, ParseMode};
 use crate::source::Source;
-use crate::{ast, codegen, fmt, stdlib};
+use crate::{ast, cheader, codegen, fmt, stdlib};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -163,6 +163,51 @@ fn load_program(main_file: &Path, package_src: Option<&Path>) -> Result<Vec<Sour
         files.push(SourceFile { src: parsed.src, ast: parsed.file, module, std: false, open: false });
     }
     if ok { Ok(files) } else { Err(()) }
+}
+
+/// Adds the declarations `extern "lib" header "x.h"` blocks generate, as a
+/// file of the same module (see cheader.rs).
+fn import_headers(files: &mut Vec<SourceFile>, include: &Path, cache: &Path) -> Result<(), ()> {
+    let mut extra = Vec::new();
+    let mut ok = true;
+    for f in files.iter().filter(|f| !f.std) {
+        for item in &f.ast.items {
+            let crate::ast::ItemKind::Extern(e) = &item.kind else { continue };
+            let Some(h) = &e.header else { continue };
+            let text = |s: &crate::ast::StrLit| s.parts.iter().map(|p| if let crate::ast::StrPart::Text(t) = p { t.as_str() } else { "" }).collect::<String>();
+            let (header, lib) = (text(h), text(&e.lib));
+            let skip: std::collections::HashSet<String> = e
+                .items
+                .iter()
+                .flatten()
+                .filter_map(|it| match &it.kind {
+                    crate::ast::ItemKind::Fn(d) => Some(d.name.name.clone()),
+                    crate::ast::ItemKind::Type(t) => Some(t.name.name.clone()),
+                    _ => None,
+                })
+                .collect();
+            let req = cheader::Request { header: &header, lib: &lib, blocking: e.blocking, skip: &skip, include, cache };
+            match cheader::import(&req) {
+                Ok(imp) => {
+                    let parsed = parse_source(Source::new(display_path(&imp.path), imp.text), ParseMode::File);
+                    if !parsed.diags.is_empty() {
+                        report(&parsed.src, &parsed.diags);
+                        eprintln!("error: the declarations generated from \"{header}\" don't parse; this is a bug in the compiler");
+                        ok = false;
+                        continue;
+                    }
+                    extra.push(SourceFile { src: parsed.src, ast: parsed.file, module: f.module.clone(), std: false, open: false });
+                }
+                Err(msg) => {
+                    let (line, col) = f.src.line_col(h.span.lo);
+                    eprintln!("{}:{line}:{col}: error: can't import \"{header}\": {msg}", f.src.path);
+                    ok = false;
+                }
+            }
+        }
+    }
+    files.extend(extra);
+    if ok { Ok(()) } else { Err(()) }
 }
 
 // ---- fmt ----
@@ -352,10 +397,15 @@ fn build_cmd(args: &[String], action: Action) -> i32 {
                 (root.join("src").join("main.ovt"), Some(root.join("src")), root.join(".ovt"), n)
             }
         };
-        files = match load_program(&main_file, src_dir.as_deref()) {
+        let mut loaded = match load_program(&main_file, src_dir.as_deref()) {
             Ok(f) => f,
             Err(()) => return 1,
         };
+        let include = src_dir.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| dir.parent().map(Path::to_path_buf).unwrap_or_default());
+        if import_headers(&mut loaded, &include, &dir.join("build").join("headers")).is_err() {
+            return 1;
+        }
+        files = loaded;
         out_dir = dir;
         name = n;
     }
@@ -421,7 +471,8 @@ fn build_cmd(args: &[String], action: Action) -> i32 {
     let opt = std::env::var("OVT_OPT").unwrap_or_else(|_| "-O2".into());
     // Extra clang flags, like `-fsanitize=address` when testing the compiler.
     let extra = std::env::var("OVT_CFLAGS").unwrap_or_default();
-    let out = Command::new(clang()).arg(&opt).args(extra.split_whitespace()).args(["-w", "-o"]).arg(&bin).arg(&ll).arg(&rt).output();
+    let libs: Vec<String> = program.libs.iter().map(|l| format!("-l{l}")).collect();
+    let out = Command::new(clang()).arg(&opt).args(extra.split_whitespace()).args(["-w", "-o"]).arg(&bin).arg(&ll).arg(&rt).args(&libs).output();
     match out {
         Ok(o) if o.status.success() => {}
         Ok(o) => {

@@ -1,3 +1,1 @@
-later_features.ovt:2:10: error: the `ffi` module isn't available in this compiler yet (planned for milestone 5)
-later_features.ovt:3:12: error: fixed-size arrays `[T; N]` aren't supported by this compiler yet (planned for milestone 5); use an array `[T]`, like `[u32(0)].repeat(64)`
-later_features.ovt:4:3: error: `unsafe` isn't supported by this compiler yet (planned for milestone 5)
+later_features.ovt:2:12: error: fixed-size arrays `[T; N]` aren't supported by this compiler yet; use an array `[T]`, like `[u32(0)].repeat(64)`

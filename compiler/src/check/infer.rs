@@ -58,6 +58,7 @@ impl Infer {
         match self.shallow(t) {
             Ty::Array(e) => Ty::Array(Box::new(self.resolve(&e))),
             Ty::Opt(e) => Ty::Opt(Box::new(self.resolve(&e))),
+            Ty::Ptr(e) => Ty::Ptr(Box::new(self.resolve(&e))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve(t)).collect()),
             Ty::Adt(id, ts) => Ty::Adt(id, ts.iter().map(|t| self.resolve(t)).collect()),
             Ty::Fn(f) => Ty::Fn(Box::new(FnTy {
@@ -136,7 +137,7 @@ impl Infer {
                 VarKind::IntLit => t.is_numeric() && self.bind(*x, t.clone()),
                 VarKind::FloatLit => matches!(t, Ty::Float(_)) && self.bind(*x, t.clone()),
             },
-            (Ty::Array(x), Ty::Array(y)) | (Ty::Opt(x), Ty::Opt(y)) => self.unify(x, y),
+            (Ty::Array(x), Ty::Array(y)) | (Ty::Opt(x), Ty::Opt(y)) | (Ty::Ptr(x), Ty::Ptr(y)) => self.unify(x, y),
             (Ty::Tuple(xs), Ty::Tuple(ys)) => xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| self.unify(x, y)),
             (Ty::Adt(i, xs), Ty::Adt(j, ys)) => i == j && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| self.unify(x, y)),
             (Ty::Fn(f), Ty::Fn(g)) => {

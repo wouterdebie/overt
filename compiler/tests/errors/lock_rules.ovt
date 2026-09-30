@@ -1,26 +1,8 @@
-type Box { n: int }
-
-fn f(s: Shared[Box], xs: [int]) -> int ! io, fail {
-  lock s as b {
-    print(b.n)
-  }
-  lock s as b {
-    b.n = int.parse("1")?
-  }
-  for x in xs {
-    lock s as b {
-      if x > 1 {
-        break
-      }
-    }
-  }
-  lock s as b {
-    return b.n
-  }
+fn f(xs: [int]) -> int {
   lock xs as v {}
   return 0
 }
 
-fn main() ! io, fail {
-  print(f(Shared.new(Box(n: 1)), [1])?)
+fn main() ! io {
+  print(f([1]))
 }

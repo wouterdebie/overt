@@ -7,6 +7,7 @@
 mod body;
 mod call;
 mod infer;
+mod moves;
 mod pat;
 mod zonk;
 
@@ -106,6 +107,10 @@ pub struct Checker<'a> {
     pub tests: Vec<TestDef>,
     /// Methods declared for an `Adt` must live in that type's module.
     adt_files: Vec<FileId>,
+    /// Libraries named by `extern` blocks, in order.
+    pub libs: Vec<String>,
+    /// Set while resolving the type a `*` points to, where C types are allowed.
+    behind_ptr: bool,
 }
 
 pub fn check(files: &[SourceFile], tests: TestSel) -> Result<Program, Vec<Diag>> {
@@ -123,6 +128,8 @@ pub fn check(files: &[SourceFile], tests: TestSel) -> Result<Program, Vec<Diag>>
         known: Known::default(),
         tests: Vec::new(),
         adt_files: Vec::new(),
+        libs: Vec::new(),
+        behind_ptr: false,
     };
     for f in files {
         if !f.open {
@@ -135,6 +142,7 @@ pub fn check(files: &[SourceFile], tests: TestSel) -> Result<Program, Vec<Diag>>
     let pending = c.collect_fns();
     c.find_known_fns();
     c.check_field_defaults(&adt_items);
+    c.check_resource_fields(&adt_items);
     for i in 0..c.consts.len() {
         c.const_value(i);
     }
@@ -142,6 +150,7 @@ pub fn check(files: &[SourceFile], tests: TestSel) -> Result<Program, Vec<Diag>>
         c.check_fn_body(p.id, p.ast, p.file);
     }
     c.collect_tests(&pending, tests);
+    c.check_resources();
     let main = c.find_main();
     if !c.diags.is_empty() {
         let mut diags = std::mem::take(&mut c.diags);
@@ -149,7 +158,7 @@ pub fn check(files: &[SourceFile], tests: TestSel) -> Result<Program, Vec<Diag>>
         diags.dedup_by(|a, b| a.file == b.file && a.span == b.span && a.msg == b.msg);
         return Err(diags);
     }
-    Ok(Program { adts: c.adts, fns: c.fns, closures: c.closures, main, tests: c.tests, known: c.known })
+    Ok(Program { libs: c.libs, adts: c.adts, fns: c.fns, closures: c.closures, main, tests: c.tests, known: c.known })
 }
 
 pub fn is_snake(name: &str) -> bool {
@@ -218,7 +227,15 @@ impl<'a> Checker<'a> {
     fn collect_types(&mut self) -> Vec<(AdtId, &'a ast::Item, FileId)> {
         let mut items = Vec::new();
         for (fi, f) in self.files.iter().enumerate() {
+            // Types in `extern` blocks too: C types, spelled as in C.
+            let mut all: Vec<&'a ast::Item> = Vec::new();
             for item in &f.ast.items {
+                all.push(item);
+                if let ItemKind::Extern(ast::ExternDecl { items: Some(inner), .. }) = &item.kind {
+                    all.extend(inner.iter());
+                }
+            }
+            for item in all {
                 let (name, generics, is_enum) = match &item.kind {
                     ItemKind::Type(t) => {
                         if matches!(t.body, TypeBody::Alias(_)) {
@@ -229,7 +246,8 @@ impl<'a> Checker<'a> {
                     ItemKind::Enum(e) => (&e.name, &e.generics, true),
                     _ => continue,
                 };
-                if !is_pascal(&name.name) {
+                let opaque = matches!(&item.kind, ItemKind::Type(t) if matches!(t.body, TypeBody::Opaque));
+                if !opaque && !is_pascal(&name.name) {
                     self.err(fi, name.span, format!("type names are PascalCase: rename `{}` to `{}`", name.name, to_pascal(&name.name)));
                 }
                 let id = self.adts.len();
@@ -240,6 +258,8 @@ impl<'a> Checker<'a> {
                     generics,
                     kind: if is_enum { AdtKind::Enum(Vec::new()) } else { AdtKind::Struct(Vec::new()) },
                     file: fi,
+                    opaque,
+                    drop: None,
                 });
                 self.adt_files.push(fi);
                 let scope = self.home_scope(fi);
@@ -248,7 +268,9 @@ impl<'a> Checker<'a> {
                 } else {
                     self.home_scope(fi).types.insert(name.name.clone(), TypeRef::Adt(id));
                 }
-                items.push((id, item, fi));
+                if !opaque {
+                    items.push((id, item, fi));
+                }
             }
         }
         // Aliases, in order; an alias may use types declared anywhere, and earlier aliases.
@@ -439,6 +461,7 @@ impl<'a> Checker<'a> {
 
     /// Resolves a written type. `generics` are the type parameters in scope.
     pub fn resolve_type(&mut self, t: &ast::TypeExpr, file: FileId, generics: &[GenericDef]) -> Ty {
+        let behind_ptr = std::mem::take(&mut self.behind_ptr);
         match &t.kind {
             TypeKind::Array(e) => Ty::array(self.resolve_type(e, file, generics)),
             TypeKind::Optional(e) => {
@@ -465,14 +488,25 @@ impl<'a> Checker<'a> {
                 Ty::Fn(Box::new(FnTy { params, ret, eff }))
             }
             TypeKind::Fixed(..) => {
-                self.err(file, t.span, "fixed-size arrays `[T; N]` aren't supported by this compiler yet (planned for milestone 5); use an array `[T]`, like `[u32(0)].repeat(64)`");
+                self.err(file, t.span, "fixed-size arrays `[T; N]` aren't supported by this compiler yet; use an array `[T]`, like `[u32(0)].repeat(64)`");
                 Ty::Error
             }
-            TypeKind::Ptr(_) => {
-                self.err(file, t.span, "raw pointers aren't supported by this compiler yet (planned for milestone 5)");
-                Ty::Error
+            TypeKind::Ptr(inner) => {
+                self.behind_ptr = true;
+                let inner = self.resolve_type(inner, file, generics);
+                Ty::Ptr(Box::new(inner))
             }
-            TypeKind::Named { path, args } => self.resolve_named(path, args, file, generics, t.span),
+            TypeKind::Named { path, args } => {
+                let ty = self.resolve_named(path, args, file, generics, t.span);
+                if let Ty::Adt(id, _) = &ty {
+                    if self.adts[*id].opaque && !behind_ptr {
+                        let name = self.adts[*id].name.clone();
+                        self.err(file, t.span, format!("`{name}` is a C type, so it's used behind a pointer: `*{name}`"));
+                        return Ty::Error;
+                    }
+                }
+                ty
+            }
         }
     }
 
@@ -645,8 +679,23 @@ impl<'a> Checker<'a> {
                         });
                         self.home_scope(fi).consts.insert(k.name.name.clone(), id);
                     }
-                    ItemKind::Extern(_) => self.err(fi, item.span, "`extern` isn't supported by this compiler yet (planned for milestone 5)"),
-                    ItemKind::Drop(_) => self.err(fi, item.span, "`drop` isn't supported by this compiler yet (planned for milestone 5)"),
+                    ItemKind::Extern(e) => {
+                        let lib: String = e.lib.parts.iter().map(|p| if let ast::StrPart::Text(t) = p { t.as_str() } else { "" }).collect();
+                        if lib != "c" && !self.libs.contains(&lib) {
+                            self.libs.push(lib);
+                        }
+                        // A header's declarations are in a file generated beside this one.
+                        for it in e.items.iter().flatten() {
+                            if let ItemKind::Fn(d) = &it.kind {
+                                self.declare_extern_fn(d, fi, e.blocking || d.blocking);
+                            }
+                        }
+                    }
+                    ItemKind::Drop(d) => {
+                        if let Some((id, decl)) = self.declare_drop(d, fi) {
+                            pending.push(PendingFn { id, ast: decl, file: fi });
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -656,10 +705,6 @@ impl<'a> Checker<'a> {
 
     fn declare_fn(&mut self, d: &'a ast::FnDecl, fi: FileId) -> Option<FnId> {
         let file = &self.files[fi];
-        if d.is_unsafe {
-            self.err(fi, d.sig_span, "`unsafe fn` isn't supported by this compiler yet (planned for milestone 5)");
-            return None;
-        }
         if !is_snake(&d.name.name) {
             self.err(fi, d.name.span, format!("function names are snake_case: rename `{}` to `{}`", d.name.name, to_snake(&d.name.name)));
         }
@@ -730,6 +775,8 @@ impl<'a> Checker<'a> {
             eff,
             has_self,
             intrinsic,
+            ext: None,
+            is_unsafe: d.is_unsafe,
             body: None,
             span: d.name.span,
         });
@@ -750,6 +797,134 @@ impl<'a> Checker<'a> {
             }
         }
         Some(id)
+    }
+
+    /// `drop T { ... }`: a function taking `self: T`, run when a `T` is
+    /// destroyed. It may do `io`, but can't fail.
+    fn declare_drop(&mut self, d: &'a ast::DropDecl, fi: FileId) -> Option<(FnId, &'a ast::FnDecl)> {
+        let ty = self.resolve_type(&d.ty, fi, &[]);
+        let id = match &ty {
+            Ty::Adt(id, args) if args.is_empty() && !self.adts[*id].opaque && self.adts[*id].module == self.files[fi].module && !self.files[self.adts[*id].file].std => *id,
+            Ty::Adt(id, _) if self.adts[*id].type_params() > 0 => {
+                self.err(fi, d.ty.span, "`drop` for a generic type isn't supported by this compiler yet");
+                return None;
+            }
+            Ty::Error => return None,
+            _ => {
+                self.err(fi, d.ty.span, "`drop` needs a struct or enum declared in this module");
+                return None;
+            }
+        };
+        let name = self.adts[id].name.clone();
+        if self.adts[id].drop.is_some() {
+            self.err(fi, d.ty.span, format!("`drop {name}` is declared twice"));
+            return None;
+        }
+        let module = self.files[fi].module.clone();
+        let fid = self.fns.len();
+        self.fns.push(FnDef {
+            name: format!("drop {name}"),
+            symbol: format!("{module}.{name}.drop"),
+            module,
+            file: fi,
+            generics: Vec::new(),
+            params: vec![ParamDef { name: "self".into(), mode: Mode::Read, ty: ty.clone(), default: None }],
+            ret: Ty::Unit,
+            eff: Eff { io: true, ..Eff::pure() },
+            has_self: true,
+            intrinsic: None,
+            ext: None,
+            is_unsafe: false,
+            body: None,
+            span: d.ty.span,
+        });
+        self.adts[id].drop = Some(fid);
+        // Checked like a method `fn T.drop(self) ! io`.
+        let decl: &'a ast::FnDecl = Box::leak(Box::new(ast::FnDecl {
+            is_unsafe: false,
+            blocking: false,
+            recv: None,
+            name: ast::Ident { name: "drop".into(), span: d.ty.span },
+            generics: Vec::new(),
+            params: vec![ast::Param { mode: Mode::Read, name: ast::Ident { name: "self".into(), span: d.ty.span }, ty: None, default: None, span: d.ty.span }],
+            ret: None,
+            effects: Vec::new(),
+            pre: Vec::new(),
+            ex: Vec::new(),
+            body: Some(d.body.clone()),
+            sig_span: d.ty.span,
+        }));
+        Some((fid, decl))
+    }
+
+    /// A C function in an `extern` block: called by its C name, with C types only.
+    fn declare_extern_fn(&mut self, d: &'a ast::FnDecl, fi: FileId, blocking: bool) {
+        if d.recv.is_some() || !d.generics.is_empty() {
+            self.err(fi, d.name.span, "a C function can't be a method or generic");
+            return;
+        }
+        if !d.effects.is_empty() {
+            self.err(fi, d.sig_span, "C functions have the `io` effect already; remove the effects");
+        }
+        let mut params = Vec::new();
+        for p in &d.params {
+            let ty = match &p.ty {
+                Some(t) => self.resolve_type(t, fi, &[]),
+                None => {
+                    self.err(fi, p.span, "a C function has no `self`");
+                    Ty::Error
+                }
+            };
+            if p.mode != Mode::Read {
+                self.err(fi, p.span, "C takes its arguments by value; use a pointer type, like `*T`, and pass `inout x`");
+            }
+            if let Some(why) = self.not_c(&ty) {
+                self.err(fi, p.span, why);
+            }
+            params.push(ParamDef { name: p.name.name.clone(), mode: Mode::Read, ty, default: None });
+        }
+        let ret = d.ret.as_ref().map(|r| self.resolve_type(r, fi, &[])).unwrap_or(Ty::Unit);
+        if ret != Ty::Unit {
+            if let Some(why) = self.not_c(&ret) {
+                self.err(fi, d.ret.as_ref().unwrap().span, why);
+            }
+        }
+        let module = self.files[fi].module.clone();
+        let id = self.fns.len();
+        self.fns.push(FnDef {
+            name: d.name.name.clone(),
+            symbol: d.name.name.clone(),
+            module,
+            file: fi,
+            generics: Vec::new(),
+            params,
+            ret,
+            eff: Eff { io: true, ..Eff::pure() },
+            has_self: false,
+            intrinsic: None,
+            ext: Some(ExternInfo { blocking }),
+            is_unsafe: true,
+            body: None,
+            span: d.name.span,
+        });
+        let scope = self.home_scope(fi);
+        if scope.fns.contains_key(&d.name.name) {
+            self.err(fi, d.name.span, format!("`{}` is declared twice", d.name.name));
+        } else {
+            scope.fns.insert(d.name.name.clone(), id);
+        }
+    }
+
+    /// Why `ty` can't be passed to or returned from C, if it can't.
+    fn not_c(&self, ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Ptr(_) | Ty::Error => None,
+            Ty::Str => Some("a `str` can't be passed to C; use `*u8` and pass `s.c_str()`".into()),
+            Ty::Adt(id, _) if !self.adts[*id].is_enum() && !self.adts[*id].opaque => {
+                Some(format!("passing a struct to C by value isn't supported by this compiler yet; use a pointer: `*{}`", self.adts[*id].name))
+            }
+            _ => Some(format!("`{}` can't be passed to C; C functions take numbers, `bool` and pointers", self.ty_name(ty))),
+        }
     }
 
     /// The receiver of `fn Recv[G].name`: its key, type and generic parameters.
@@ -941,6 +1116,7 @@ impl<'a> Checker<'a> {
             Ty::Error | Ty::Var(_) => "_".into(),
             Ty::Array(e) => format!("[{}]", self.ty_name_with(e, params)),
             Ty::Opt(e) => format!("?{}", self.ty_name_with(e, params)),
+            Ty::Ptr(e) => format!("*{}", self.ty_name_with(e, params)),
             Ty::Tuple(ts) => format!("({})", ts.iter().map(|t| self.ty_name_with(t, params)).collect::<Vec<_>>().join(", ")),
             Ty::Adt(id, args) => {
                 let a = &self.adts[*id];

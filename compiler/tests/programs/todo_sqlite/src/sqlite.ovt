@@ -1,0 +1,121 @@
+// A small sqlite binding: a connection and its prepared statements, each a
+// resource that closes when it's dropped.
+
+// Statements run on the calling task's thread: with the write-ahead log, a
+// commit writes to the log file without waiting for the disk, and a query
+// reads pages the OS has cached. A `blocking` call would cost a trip to the
+// blocking pool for every row. The setup statements, which can wait for the
+// disk, do run there.
+extern "sqlite3" header "sqlite3.h" {
+  blocking fn sqlite3_exec(db: *sqlite3, sql: *u8, callback: *u8, arg: *u8, errmsg: **u8) -> ffi.int
+}
+
+// An open database.
+type Db { raw: *sqlite3 }
+
+drop Db {
+  unsafe {
+    _ = sqlite3_close(self.raw)
+  }
+}
+
+// A prepared statement of a `Db`.
+type Stmt { raw: *sqlite3_stmt, db: *sqlite3 }
+
+drop Stmt {
+  unsafe {
+    _ = sqlite3_finalize(self.raw)
+  }
+}
+
+// Opens the database at `path`, creating it if it doesn't exist.
+fn Db.open(path: str) -> Db ! io, fail {
+  var raw: *sqlite3 = ffi.null()
+  let rc = unsafe { sqlite3_open(path.c_str(), inout raw) }
+  // Wrapped at once, so it's closed even if opening failed.
+  let db = Db(raw)
+  if rc != SQLITE_OK {
+    fail(.Io, "can't open ${path}: ${db.error()}")
+  }
+  return db
+}
+
+// The message of the connection's last error.
+fn Db.error(self) -> str ! io {
+  return unsafe { ffi.string(sqlite3_errmsg(self.raw)) else "unknown error" }
+}
+
+// Runs statements that return no rows.
+fn Db.exec(self, sql: str) ! io, fail {
+  var err: *u8 = ffi.null()
+  let rc = unsafe { sqlite3_exec(self.raw, sql.c_str(), ffi.null(), ffi.null(), inout err) }
+  if rc != SQLITE_OK {
+    let msg = unsafe { ffi.string(err) else "unknown error" }
+    unsafe {
+      sqlite3_free(err)
+    }
+    fail(.Internal, "${sql}: ${msg}")
+  }
+}
+
+fn Db.prepare(self, sql: str) -> Stmt ! io, fail {
+  var raw: *sqlite3_stmt = ffi.null()
+  let rc = unsafe { sqlite3_prepare_v2(self.raw, sql.c_str(), -1, inout raw, ffi.null()) }
+  if rc != SQLITE_OK {
+    fail(.Internal, "${sql}: ${self.error()}")
+  }
+  return Stmt(raw, db: self.raw)
+}
+
+// The rowid of the last row inserted.
+fn Db.last_id(self) -> int ! io {
+  return unsafe { sqlite3_last_insert_rowid(self.raw) }
+}
+
+// How many rows the last statement changed.
+fn Db.changes(self) -> int ! io {
+  return int(unsafe { sqlite3_changes(self.raw) })
+}
+
+fn Stmt.check(self, rc: ffi.int) ! io, fail {
+  if rc != SQLITE_OK {
+    let msg = unsafe { ffi.string(sqlite3_errmsg(self.db)) else "unknown error" }
+    fail(.Internal, msg)
+  }
+}
+
+// Binds parameter `i` (counting from 1).
+fn Stmt.bind_int(self, i: int, v: int) ! io, fail {
+  self.check(unsafe { sqlite3_bind_int64(self.raw, ffi.int(i), v) })?
+}
+
+fn Stmt.bind_text(self, i: int, v: str) ! io, fail {
+  // SQLITE_TRANSIENT: sqlite copies the text.
+  let copy = ffi.to_ptr[u8](-1)
+  self.check(unsafe { sqlite3_bind_text(self.raw, ffi.int(i), v.c_str(), ffi.int(v.len()), copy) })?
+}
+
+// Runs the statement to its next row; false once there are none.
+fn Stmt.step(self) -> bool ! io, fail {
+  let rc = unsafe { sqlite3_step(self.raw) }
+  if rc == SQLITE_ROW {
+    return true
+  }
+  if rc != SQLITE_DONE {
+    self.check(rc)?
+  }
+  return false
+}
+
+// Column `i` (counting from 0) of the current row.
+fn Stmt.int(self, i: int) -> int ! io {
+  return unsafe { sqlite3_column_int64(self.raw, ffi.int(i)) }
+}
+
+fn Stmt.text(self, i: int) -> str ! io, fail {
+  let bytes = unsafe {
+    let p = sqlite3_column_text(self.raw, ffi.int(i))
+    ffi.bytes(p, int(sqlite3_column_bytes(self.raw, ffi.int(i))))
+  }
+  return str.from_bytes(bytes)?
+}

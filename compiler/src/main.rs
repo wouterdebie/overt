@@ -1,5 +1,7 @@
 mod ast;
 mod check;
+mod cheader;
+mod cjson;
 mod codegen;
 mod diag;
 mod driver;

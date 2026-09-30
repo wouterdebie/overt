@@ -140,7 +140,7 @@ Everything is a value: assigning or passing one gives the receiver its own copy.
 |---|---|---|
 | plain | numbers, `bool`, structs of plain fields | copies the bytes |
 | heap-backed | `str`, `[T]`, `Map`, `Set` | shares the data until a write |
-| resource | `fs.File`, C handles | not allowed; values move |
+| resource | a type with `drop`, like a C handle's wrapper | not allowed; values move |
 | shared handle | `Shared[T]`, `Atomic[T]`, `Chan[T]`, `net.Conn` | both copies refer to the same object |
 
 - `let` bindings can't change; `var` bindings can. Parameters are read-only unless marked.
@@ -154,7 +154,7 @@ Everything is a value: assigning or passing one gives the receiver its own copy.
 - Methods take `self`, `inout self` or `sink self`. Calling an `inout self` method needs a `var` receiver and no marker: `stack.push(1)`.
 - A variable can't be passed as `inout` twice in one call.
 - Change values in place: `p.x = 1`, `xs[i] += 1`, `m[k] = v`, `for inout x in xs { x += 1 }`.
-- `drop T { ... }` makes `T` a resource: it can only be moved, and the block runs when the value is destroyed (`self` names it). A type containing a resource is a resource.
+- `drop T { ... }` makes `T` a resource: it can only be moved, and the block runs when the value is destroyed (`self` names it). A type containing a resource is a resource. Arrays, maps, sets, closures and generic functions copy, so they can't hold resources; `Shared` and `Chan` can.
 
 ## Control flow
 
@@ -219,7 +219,7 @@ return render(user, posts)
 - `task.group(|g| { ... g.spawn(|| handle(conn)) ... })` runs any number of tasks and returns once all have finished. Spawned closures can't fail; they handle their own errors.
 - `task.timeout(5s, || fetch(url))` fails with `.Timeout` if time runs out. A cancelled task's next `io` call fails with `.Cancelled`.
 - Tasks share nothing: a value handed to a task is a copy. Shared mutable state uses shared handles:
-  - `Shared[T]`: create with `Shared.new(v)`. `lock s as v { ... }` gives `v: inout T` for the block. It works on any `Shared` value, including a read-only parameter. No `io` is allowed inside a `lock` block, and a failure, `return` or `break` can't leave it.
+  - `Shared[T]`: create with `Shared.new(v)`. `lock s as v { ... }` gives `v: inout T` for the block. It works on any `Shared` value, including a read-only parameter. Other tasks wait while it's held, so keep it short; leaving it any way (`return`, a failure) unlocks.
   - `Atomic[int]`: `.load()`, `.store(n)`, `.add(n)`.
   - `Chan[T]`: bounded queue, created with `Chan[Msg].new(64)`. `.send(v)` waits while it's full (`! io, fail`). `.recv()` returns `none` once it's closed and empty (`! io`). Also `.close()` and `for m in ch { ... }`.
 
@@ -236,9 +236,12 @@ extern "sqlite3" {                                     // links libsqlite3
 extern "z" header "zlib.h"                             // declarations generated from the header
 ```
 
-- Extern functions and raw pointers (`*T`) can only be used inside `unsafe { ... }` or an `unsafe fn`. Pointer operations are in `ffi`. `s.c_str()` gives a NUL-terminated copy.
-- Mark C calls that can block (disk, DNS, heavy work) `blocking`; they run on a separate thread pool. `blocking extern "z" header "zlib.h"` marks a whole header.
-- C types: `ffi.int ffi.uint ffi.long ffi.ulong ffi.size ffi.char`. Overt structs use C layout.
+- Calling C functions, `unsafe fn`s and `ffi`'s pointer operations needs `unsafe { ... }` or an `unsafe fn`. C calls have the `io` effect and take arguments by position; they can't fail, so check their return codes.
+- `inout v` passes a pointer to `v`, for out-parameters: `sqlite3_open(path.c_str(), inout db)` after `var db: *sqlite3 = ffi.null()`.
+- `s.c_str()` gives a NUL-terminated copy, valid until the end of the block; `ffi.string(p)` copies a C string back.
+- Mark C calls that can block for long (DNS, `fsync`, heavy work) `blocking`: they run on a thread pool, which costs microseconds per call. `blocking extern "z" header "zlib.h"` marks a whole header.
+- `header` generates declarations for the header's functions, C types and integer constants. A block after it replaces some: `extern "sqlite3" header "sqlite3.h" { blocking fn sqlite3_exec(...) }`. C structs are opaque, used behind pointers.
+- C types: `ffi.int ffi.uint ffi.long ffi.ulong ffi.size ffi.char`.
 - Wrap each C handle in a resource so the rest of the program stays safe:
 
 ```ovt

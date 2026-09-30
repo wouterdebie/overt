@@ -119,6 +119,22 @@ impl<'p> Gen<'p> {
     // ---- dup and drop ----
 
     fn gen_rc(&mut self, ty: &Ty, p: &str, dup: bool) {
+        if let Ty::Adt(id, _) = ty {
+            if dup && self.resources.contains(id) {
+                // The checker rejects copies of resources, so this is a compiler bug.
+                let msg = self.cstr(b"internal error: a resource was copied");
+                let file = self.cstr(b"<compiler>");
+                self.inst(&format!("call void @ovt_trap(ptr {msg}, i64 37, ptr {file}, i32 0, i32 0)"));
+                return;
+            }
+            if let (false, Some(d)) = (dup, self.p.adts[*id].drop) {
+                // The `drop` block first, then the fields.
+                let sym = self.fn_inst(d, &[], &[]);
+                let lt = self.lty(ty);
+                let v = self.load(&lt, p);
+                self.inst(&format!("call void {sym}({})", v.op()));
+            }
+        }
         match ty {
             Ty::Str | Ty::Array(_) => {
                 let buf = self.load("ptr", p);
@@ -334,6 +350,13 @@ impl<'p> Gen<'p> {
             }
             Ty::Unit => "true".into(),
             Ty::Fn(_) => "false".into(),
+            Ty::Ptr(_) => {
+                let x = self.load("ptr", a);
+                let y = self.load("ptr", b);
+                let t = self.tmp();
+                self.inst(&format!("{t} = icmp eq ptr {}, {}", x.repr, y.repr));
+                t
+            }
             Ty::Str => {
                 let r = self.tmp();
                 self.inst(&format!("{r} = call i32 @ovt_str_eq(ptr {a}, ptr {b})"));
@@ -676,6 +699,12 @@ impl<'p> Gen<'p> {
                 t
             }
             Ty::Unit | Ty::Fn(_) => "0".into(),
+            Ty::Ptr(_) => {
+                let v = self.load("ptr", p);
+                let x = self.tmp();
+                self.inst(&format!("{x} = ptrtoint ptr {} to i64", v.repr));
+                self.mix("0", &x)
+            }
             Ty::Array(e) => {
                 let e = (**e).clone();
                 let acc = self.alloca("i64");
@@ -823,6 +852,10 @@ impl<'p> Gen<'p> {
             Ty::Str => self.inst(&format!("call void @ovt_sb_quoted(ptr {sb}, ptr {p})")),
             Ty::Unit => self.lit(sb, "()"),
             Ty::Fn(_) => self.lit(sb, "<fn>"),
+            Ty::Ptr(_) => {
+                let v = self.load("ptr", p);
+                self.inst(&format!("call void @ovt_sb_ptr(ptr {sb}, ptr {})", v.repr));
+            }
             Ty::Array(e) => {
                 let e = (**e).clone();
                 self.lit(sb, "[");

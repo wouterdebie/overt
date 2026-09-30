@@ -456,6 +456,38 @@ int32_t ovt_str_from_bytes(ovt_str *out, const ovt_arr *b) {
   return 1;
 }
 
+// A NUL-terminated copy of `s` in `out`; returns its first byte.
+char *ovt_c_str(ovt_str *out, const ovt_str *s) {
+  ovt_buf *b = buf_new(s->len + 1, 1);
+  memcpy(DATA(b), sdata(s), (size_t)s->len);
+  DATA(b)[s->len] = 0;
+  b->used = s->len + 1;
+  out->buf = b;
+  out->off = 0;
+  out->len = s->len + 1;
+  return DATA(b);
+}
+
+// ffi.string: a copy of a C string, or 0 if it isn't UTF-8.
+int32_t ovt_ffi_string(ovt_str *out, const char *p) {
+  out->buf = NULL;
+  out->off = 0;
+  out->len = 0;
+  if (!p) return 1;
+  size_t n = strlen(p);
+  if (!utf8_valid((const unsigned char *)p, (int64_t)n)) return 0;
+  ovt_str_append_bytes(out, p, (int64_t)n);
+  return 1;
+}
+
+// ffi.bytes: a copy of n bytes.
+void ovt_ffi_bytes(ovt_arr *out, const char *p, int64_t n) {
+  out->buf = NULL;
+  out->off = 0;
+  out->len = 0;
+  if (p && n > 0) ovt_str_append_bytes(out, p, n);
+}
+
 void ovt_str_runes(ovt_arr *out, const ovt_str *s) {
   const unsigned char *d = (const unsigned char *)sdata(s);
   ovt_buf *nb = buf_new(s->len, 4);
@@ -532,6 +564,12 @@ void ovt_sb_f64(ovt_str *sb, double v) {
     }
     if (!strpbrk(buf, ".e")) n += snprintf(buf + n, sizeof buf - (size_t)n, ".0");
   }
+  ovt_str_append_bytes(sb, buf, n);
+}
+
+void ovt_sb_ptr(ovt_str *sb, const void *p) {
+  char buf[32];
+  int n = p ? snprintf(buf, sizeof buf, "ptr(%p)", p) : snprintf(buf, sizeof buf, "ptr(null)");
   ovt_str_append_bytes(sb, buf, n);
 }
 
@@ -1202,6 +1240,7 @@ void ovt_dbg(const ovt_str *shown, const char *file, int32_t line, int32_t col, 
 #include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <mach/vm_statistics.h>
 #include <sys/sysctl.h>
 
 #if !defined(__aarch64__)
@@ -1400,7 +1439,8 @@ static char *stack_new(size_t size) {
     pthread_mutex_unlock(&stacks_mu);
     if (s) return s;
   }
-  char *s = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+  // Tagged as a stack, so tools like `leaks` look for pointers in it.
+  char *s = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, VM_MAKE_TAG(VM_MEMORY_STACK), 0);
   if (s == MAP_FAILED) oom();
   // The lowest page is the guard: running into it means the stack overflowed.
   mprotect(s, page_size, PROT_NONE);
@@ -1878,6 +1918,10 @@ static void blocking(void (*fn)(void *), void *arg) {
   pthread_mutex_unlock(&pool_mu);
   wait_for(&j.done);
 }
+
+// A `blocking` C call, from generated code: fn(args) unpacks the arguments,
+// makes the call and stores the result.
+void ovt_blocking(void (*fn)(void *), void *args) { blocking(fn, args); }
 
 // ---- the poller ----
 //

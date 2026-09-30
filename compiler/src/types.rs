@@ -101,6 +101,8 @@ pub enum Ty {
     /// A struct or enum with its type arguments.
     Adt(AdtId, Vec<Ty>),
     Fn(Box<FnTy>),
+    /// A raw pointer, `*T`, for C interop.
+    Ptr(Box<Ty>),
     /// A generic parameter of the enclosing declaration, by position.
     Param(u32),
     /// An inference variable, only inside the checker.
@@ -195,7 +197,7 @@ impl Ty {
     pub fn walk(&self, f: &mut impl FnMut(&Ty)) {
         f(self);
         match self {
-            Ty::Array(t) | Ty::Opt(t) => t.walk(f),
+            Ty::Array(t) | Ty::Opt(t) | Ty::Ptr(t) => t.walk(f),
             Ty::Tuple(ts) | Ty::Adt(_, ts) => ts.iter().for_each(|t| t.walk(f)),
             Ty::Fn(ft) => {
                 ft.params.iter().for_each(|t| t.walk(f));
@@ -211,6 +213,7 @@ impl Ty {
             Ty::Param(i) => tys.get(*i as usize).cloned().unwrap_or(Ty::Error),
             Ty::Array(t) => Ty::Array(Box::new(t.subst(tys, effs))),
             Ty::Opt(t) => Ty::Opt(Box::new(t.subst(tys, effs))),
+            Ty::Ptr(t) => Ty::Ptr(Box::new(t.subst(tys, effs))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| t.subst(tys, effs)).collect()),
             Ty::Adt(id, ts) => Ty::Adt(*id, ts.iter().map(|t| t.subst(tys, effs)).collect()),
             Ty::Fn(ft) => Ty::Fn(Box::new(FnTy {

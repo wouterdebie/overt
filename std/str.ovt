@@ -31,6 +31,9 @@ fn str.to_upper(self) -> str
 // The Unicode code points.
 fn str.runes(self) -> [u32]
 
+// A NUL-terminated copy for C, valid until the end of the block it's made in.
+fn str.c_str(self) -> *u8
+
 fn str.contains(self, pat: str) -> bool {
   return self.find(pat) != none
 }

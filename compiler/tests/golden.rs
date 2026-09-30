@@ -207,7 +207,7 @@ fn docs_fit_their_budgets() {
 fn reference_programs_pass_task_tests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
-    for (name, task) in [("wordfreq", "01-wordfreq"), ("jsonfmt", "01-jsonfmt"), ("hashdir", "02-hashdir"), ("echo", "03-echo"), ("chat", "03-chat"), ("todo", "04-todo")] {
+    for (name, task) in [("wordfreq", "01-wordfreq"), ("jsonfmt", "01-jsonfmt"), ("hashdir", "02-hashdir"), ("echo", "03-echo"), ("chat", "03-chat"), ("todo", "04-todo"), ("todo_sqlite", "05-todo-sqlite")] {
         let dir = root.join("tests/programs").join(name);
         let bin = dir.join("bin").join(name);
         let out = ovt().current_dir(&dir).args(["build", "-o"]).arg(&bin).output().unwrap();
@@ -222,6 +222,15 @@ fn reference_programs_pass_task_tests() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Task 05 runs task 04's tests unchanged, from its own copy.
+#[test]
+fn todo_sqlite_uses_the_todo_tests() {
+    let tasks = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tasks");
+    let a = read(&tasks.join("04-todo/tests/run.py"));
+    let b = read(&tasks.join("05-todo-sqlite/tests/api.py"));
+    assert!(!a.is_empty() && a == b, "tasks/05-todo-sqlite/tests/api.py must be a copy of tasks/04-todo/tests/run.py");
 }
 
 #[test]

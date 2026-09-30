@@ -34,6 +34,8 @@ pub struct GenericDef {
 }
 
 pub struct Program {
+    /// Libraries that `extern` blocks link, like "sqlite3".
+    pub libs: Vec<String>,
     pub adts: Vec<AdtDef>,
     pub fns: Vec<FnDef>,
     pub closures: Vec<ClosureDef>,
@@ -70,6 +72,10 @@ pub struct AdtDef {
     pub generics: Vec<GenericDef>,
     pub kind: AdtKind,
     pub file: FileId,
+    /// A C type declared in an `extern` block, usable only behind a pointer.
+    pub opaque: bool,
+    /// The function a `drop T { ... }` block became: `T` is a resource.
+    pub drop: Option<FnId>,
 }
 
 pub enum AdtKind {
@@ -135,8 +141,17 @@ pub struct FnDef {
     pub has_self: bool,
     /// Set for standard library functions without a body.
     pub intrinsic: Option<String>,
+    /// Set for C functions declared in `extern` blocks; the symbol is the C name.
+    pub ext: Option<ExternInfo>,
+    /// Callable only inside `unsafe`: `unsafe fn`, and C functions.
+    pub is_unsafe: bool,
     pub body: Option<Body>,
     pub span: Span,
+}
+
+pub struct ExternInfo {
+    /// Runs on the blocking pool while the calling task waits.
+    pub blocking: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,0 +1,20 @@
+extern "c" {
+  type FILE
+  fn strlen(s: *u8) -> ffi.size
+  fn puts(s: str) -> ffi.int
+  fn fclose(f: FILE) -> ffi.int
+  fn frob(p: Point) -> ffi.int
+  fn twice(n: inout ffi.int)
+}
+
+type Point { x: ffi.int, y: ffi.int }
+
+unsafe fn peek(p: *u8) -> u8 {
+  return ffi.read(p)
+}
+
+fn main() ! io {
+  let n = strlen("x".c_str())
+  let b = peek("y".c_str())
+  let v = ffi.read(ffi.null[u8]())
+}

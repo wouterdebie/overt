@@ -118,6 +118,66 @@ impl<'p> Gen<'p> {
                 let v = self.load("%ovt.arr", &out);
                 self.emit_return(Some(v));
             }
+            "ffi.null" => self.emit_return(Some(V::new("ptr", "null"))),
+            "ffi.is_null" => {
+                let t = self.tmp();
+                self.inst(&format!("{t} = icmp eq ptr {}, null", params[0].repr));
+                self.emit_return(Some(V::new("i1", t)));
+            }
+            "ffi.to_ptr" => {
+                let t = self.tmp();
+                self.inst(&format!("{t} = inttoptr i64 {} to ptr", params[0].repr));
+                self.emit_return(Some(V::new("ptr", t)));
+            }
+            "ffi.address" => {
+                let t = self.tmp();
+                self.inst(&format!("{t} = ptrtoint ptr {} to i64", params[0].repr));
+                self.emit_return(Some(V::new("i64", t)));
+            }
+            "ffi.read" => {
+                let lt = self.lty(&elem);
+                let v = self.load(&lt, &params[0].repr);
+                self.dup_value(&v, &elem);
+                self.emit_return(Some(v));
+            }
+            "ffi.write" => {
+                self.dup_value(&params[1], &elem);
+                self.inst(&format!("store {}, ptr {}", params[1].op(), params[0].repr));
+                self.emit_return(None);
+            }
+            "ffi.offset" => {
+                let lt = self.lty(&elem);
+                let t = self.tmp();
+                self.inst(&format!("{t} = getelementptr {lt}, ptr {}, i64 {}", params[0].repr, params[1].repr));
+                self.emit_return(Some(V::new("ptr", t)));
+            }
+            "ffi.string" => {
+                let out = self.alloca("%ovt.arr");
+                let ok = self.tmp();
+                self.inst(&format!("{ok} = call i32 @ovt_ffi_string(ptr {out}, ptr {})", params[0].repr));
+                let bad = self.tmp();
+                self.inst(&format!("{bad} = icmp eq i32 {ok}, 0"));
+                let fail = self.label("invalid");
+                let good = self.label("valid");
+                self.term(&format!("br i1 {bad}, label %{fail}, label %{good}"));
+                self.start(&fail);
+                let msg = self.str_const(b"the C string isn't valid UTF-8");
+                self.fail_with("0", msg);
+                self.start(&good);
+                let v = self.load("%ovt.arr", &out);
+                self.emit_return(Some(v));
+            }
+            "ffi.bytes" => {
+                let out = self.alloca("%ovt.arr");
+                self.inst(&format!("call void @ovt_ffi_bytes(ptr {out}, ptr {}, i64 {})", params[0].repr, params[1].repr));
+                let v = self.load("%ovt.arr", &out);
+                self.emit_return(Some(v));
+            }
+            "ffi.data" => {
+                let a = self.spill(&params[0]);
+                let p = self.elem_ptr(&a, "0", &elem);
+                self.emit_return(Some(V::new("ptr", p)));
+            }
             "str.runes" => {
                 let a = self.spill(&params[0]);
                 let out = self.alloca("%ovt.arr");

@@ -1,0 +1,54 @@
+// C interop: C's types on this platform (arm64 macOS), and operations on
+// raw pointers. Pointer operations are `unsafe`: they trust that the pointer
+// points to live memory of the right type.
+
+// C's `int`.
+type int = i32
+
+type uint = u32
+
+type long = i64
+
+type ulong = u64
+
+// C's `size_t`.
+type size = u64
+
+type char = u8
+
+type short = i16
+
+type ushort = u16
+
+// A null pointer.
+fn null[T]() -> *T
+
+fn is_null[T](p: *T) -> bool
+
+// The pointer for an address, like `ffi.to_ptr[u8](-1)` for a C API's
+// special value.
+fn to_ptr[T](address: int) -> *T
+
+// The address a pointer holds.
+fn address[T](p: *T) -> int
+
+// The value `p` points to.
+unsafe fn read[T](p: *T) -> T
+
+// Stores `v` where `p` points.
+unsafe fn write[T](p: *T, v: T)
+
+// The pointer `n` elements after `p`.
+unsafe fn offset[T](p: *T, n: int) -> *T
+
+// A copy of the NUL-terminated string at `p`, or "" for null. Fails with
+// `.Invalid` if it isn't UTF-8.
+unsafe fn string(p: *u8) -> str ! fail
+
+// A copy of the `n` bytes at `p`.
+unsafe fn bytes(p: *u8, n: int) -> [u8]
+
+// A pointer to the elements of `xs`, valid while `xs` is alive and
+// unchanged. For C to write into, make a fresh array:
+// `var buf = [u8(0)].repeat(n)`.
+unsafe fn data[T](xs: [T]) -> *T

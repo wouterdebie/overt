@@ -11,6 +11,15 @@ use crate::source::Span;
 
 impl<'p> Gen<'p> {
     pub fn owned(&mut self, e: &TExpr) -> V {
+        // A resource local moves: its flag is cleared, so it isn't dropped.
+        if let TK::Local(id) = &e.kind {
+            let flag = self.f.flags.get(&self.f.slots[*id]).cloned();
+            if let Some(flag) = flag {
+                let (v, _) = self.value(e);
+                self.inst(&format!("store i1 false, ptr {flag}"));
+                return v;
+            }
+        }
         let (v, owned) = self.value(e);
         if !owned && !self.f.terminated {
             let ty = self.sub(&e.ty);
@@ -287,12 +296,15 @@ impl<'p> Gen<'p> {
                 self.inst(&format!("{vp} = call ptr @ovt_shared_value(ptr {})", env.repr));
                 let slot = self.f.slots[*local].clone();
                 self.inst(&format!("store ptr {vp}, ptr {slot}"));
+                // Leaving the block, however it's left, unlocks, which marks
+                // what the value reaches shared again.
+                self.push_scope(false);
+                self.add_cleanup(Cleanup::Unlock(env.repr.clone()));
                 let v = self.block_value(body);
+                self.pop_scope();
                 if self.f.terminated {
                     return self.never();
                 }
-                // Unlocking marks what the value reaches shared again.
-                self.inst(&format!("call void @ovt_shared_unlock(ptr {})", env.repr));
                 match v {
                     Some(v) => (v, true),
                     None => (V::unit(), false),
@@ -735,6 +747,17 @@ impl<'p> Gen<'p> {
     pub fn call_raw(&mut self, e: &TExpr) -> (V, bool, Ty) {
         let rty = self.sub(&e.ty);
         match &e.kind {
+            TK::Call { f, args, .. } if self.p.fns[*f].ext.is_some() => (self.c_call(*f, args), false, rty),
+            TK::Call { f, args, .. } if self.p.fns[*f].intrinsic.as_deref() == Some("str.c_str") => {
+                // The copy lives until the end of the enclosing block.
+                let s = self.borrow(&args[0].expr);
+                let sp = self.spill(&s);
+                let copy = self.alloca("%ovt.arr");
+                let p = self.tmp();
+                self.inst(&format!("{p} = call ptr @ovt_c_str(ptr {copy}, ptr {sp})"));
+                self.add_local_drop(&copy, &Ty::Str);
+                (V::new("ptr", p), false, rty)
+            }
             TK::Call { f, targs, eargs, args } => {
                 let targs: Vec<Ty> = targs.iter().map(|t| self.sub(t)).collect();
                 let eargs: Vec<Eff> = eargs.iter().map(|x| x.subst(&self.f.eargs)).collect();
@@ -782,6 +805,61 @@ impl<'p> Gen<'p> {
                 (v, false, rty)
             }
         }
+    }
+
+    /// A call to a C function; blocking ones run on the blocking pool.
+    fn c_call(&mut self, f: FnId, args: &[TArg]) -> V {
+        let sym = self.c_fn(f);
+        let ops = self.args(args);
+        if self.f.terminated {
+            return V::unit();
+        }
+        let def = &self.p.fns[f];
+        let ptys: Vec<Ty> = def.params.iter().map(|p| p.ty.clone()).collect();
+        let ret = def.ret.clone();
+        let blocking = def.ext.as_ref().is_some_and(|x| x.blocking);
+        if blocking {
+            return self.blocking_c_call(f, &sym, &ops, &ptys, &ret);
+        }
+        let ops: Vec<String> = ops
+            .iter()
+            .zip(&ptys)
+            .map(|(o, t)| match c_attr(t) {
+                "" => o.clone(),
+                a => {
+                    let (ty, val) = o.split_once(' ').unwrap();
+                    format!("{ty}{a} {val}")
+                }
+            })
+            .collect();
+        let rt = self.c_ret(&ret);
+        if ret == Ty::Unit {
+            self.inst(&format!("call void {sym}({})", ops.join(", ")));
+            return V::unit();
+        }
+        let t = self.tmp();
+        self.inst(&format!("{t} = call {rt} {sym}({})", ops.join(", ")));
+        let lt = self.lty(&ret);
+        V::new(lt, t)
+    }
+
+    /// A `blocking` C call: the arguments go in a struct on the task's stack,
+    /// and the blocking pool runs the call while the task waits.
+    fn blocking_c_call(&mut self, f: FnId, _sym: &str, ops: &[String], ptys: &[Ty], ret: &Ty) -> V {
+        let (thunk, st) = self.blocking_thunk(f);
+        let args = self.alloca(&st);
+        for (i, o) in ops.iter().enumerate() {
+            let p = self.gep(&st, &args, &[0, i + 1]);
+            self.inst(&format!("store {o}, ptr {p}"));
+        }
+        let _ = ptys;
+        self.inst(&format!("call void @ovt_blocking(ptr {thunk}, ptr {args})"));
+        if *ret == Ty::Unit {
+            return V::unit();
+        }
+        let lt = self.lty(ret);
+        let rp = self.gep(&st, &args, &[0, 0]);
+        self.load(&lt, &rp)
     }
 
     /// The value of a successful failable call, wrapped when the result is an optional.

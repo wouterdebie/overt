@@ -69,14 +69,13 @@ pub struct FnCx {
     pub errors_before: usize,
     /// For each enclosing `par`, the variables its earlier statements declare.
     pub par_siblings: Vec<Vec<String>>,
-    /// For each enclosing `lock` block: its frame, and how many loops were
-    /// open in that frame when it started.
-    pub locks: Vec<(usize, usize)>,
+    /// How many `unsafe` blocks enclose the code being checked, plus one in an `unsafe fn`.
+    pub unsafe_depth: usize,
 }
 
 impl FnCx {
     pub fn new(file: FileId, owner: FnId, generics: Vec<GenericDef>) -> FnCx {
-        FnCx { file, owner, generics, frames: Vec::new(), infer: Infer::default(), obligations: Vec::new(), closures: Vec::new(), pure_only: false, fail_ok: false, errors_before: 0, par_siblings: Vec::new(), locks: Vec::new() }
+        FnCx { file, owner, generics, frames: Vec::new(), infer: Infer::default(), obligations: Vec::new(), closures: Vec::new(), pure_only: false, fail_ok: false, errors_before: 0, par_siblings: Vec::new(), unsafe_depth: 0 }
     }
 
     pub fn frame(&mut self) -> &mut Frame {
@@ -127,6 +126,9 @@ impl<'a> Checker<'a> {
         let f = &self.fns[id];
         let mut cx = FnCx::new(file, id, f.generics.clone());
         cx.errors_before = self.diags.len();
+        if f.is_unsafe {
+            cx.unsafe_depth = 1;
+        }
         cx.frames.push(Frame::new(f.name.clone(), f.ret.clone(), Some(f.eff.clone())));
         let params: Vec<(String, Mode, Ty, Span)> =
             d.params.iter().zip(&f.params).map(|(a, p)| (p.name.clone(), p.mode, p.ty.clone(), a.name.span)).collect();
@@ -198,6 +200,8 @@ impl<'a> Checker<'a> {
             eff: Eff::pure(),
             has_self: false,
             intrinsic: None,
+            ext: None,
+            is_unsafe: false,
             body: Some(Body { locals, params: Vec::new(), pre: Vec::new(), block: TBlock { stmts: Vec::new(), value: Some(Box::new(value)) } }),
             span,
         });
@@ -286,6 +290,8 @@ impl<'a> Checker<'a> {
             eff,
             has_self: false,
             intrinsic: None,
+            ext: None,
+            is_unsafe: false,
             body: Some(body),
             span,
         });
@@ -493,16 +499,6 @@ impl<'a> Checker<'a> {
     /// Records effects used at `span`: closures collect them, functions must declare them.
     pub fn use_effects(&mut self, cx: &mut FnCx, eff: &Eff, span: Span, callee: &str) {
         let eff = cx.infer.resolve_eff(eff);
-        if self.in_lock(cx) {
-            if eff.io {
-                self.err(cx.file, span, format!("a `lock` block can't do `io`, but `{callee}` has the `io` effect; do it after the block"));
-                return;
-            }
-            if eff.fail {
-                self.err(cx.file, span, format!("a failure can't leave a `lock` block, and `{callee}` passes one on; handle it there with `else` or `catch`, or fail after the block"));
-                return;
-            }
-        }
         if cx.pure_only && cx.fail_ok && eff.io {
             let what = cx.fr().name.clone();
             self.err(cx.file, span, format!("{what} can't use `io`, but `{callee}` has the `io` effect"));
@@ -747,11 +743,6 @@ impl<'a> Checker<'a> {
         (Some(TStmt::Par { branches: out }), false)
     }
 
-    /// Whether the current frame is inside a `lock` block.
-    fn in_lock(&self, cx: &FnCx) -> bool {
-        cx.locks.last().is_some_and(|&(f, _)| f == cx.frames.len() - 1)
-    }
-
     /// `lock s as v { body }`: `v` is the shared value, changeable in place.
     fn lock_expr(&mut self, cx: &mut FnCx, target: &Expr, name: &ast::Ident, body: &ast::Block, want: Option<&Ty>, value: bool, span: Span) -> TExpr {
         let file = cx.file;
@@ -767,11 +758,7 @@ impl<'a> Checker<'a> {
         };
         cx.frame().scopes.push(Vec::new());
         let local = self.declare(cx, &name.name, inner, LocalKind::Ref, true, name.span);
-        let frame = cx.frames.len() - 1;
-        let loops = cx.fr().loops.len();
-        cx.locks.push((frame, loops));
         let (b, ty) = self.block(cx, body, value, want);
-        cx.locks.pop();
         cx.frame().scopes.pop();
         TExpr { kind: TK::Lock { shared: Box::new(t), local, body: b }, ty, span }
     }
@@ -1416,9 +1403,11 @@ impl<'a> Checker<'a> {
             ExprKind::If { cond, then, els } => self.if_expr(cx, cond, then, els.as_deref(), span, want, value),
             ExprKind::Match { scrutinee, arms, .. } => self.match_expr(cx, scrutinee, arms, span, want, value),
             ExprKind::Lock { target, name, body } => self.lock_expr(cx, target, name, body, want, value, span),
-            ExprKind::Unsafe(_) => {
-                self.err(file, span, "`unsafe` isn't supported by this compiler yet (planned for milestone 5)");
-                self.error_expr(span)
+            ExprKind::Unsafe(b) => {
+                cx.unsafe_depth += 1;
+                let (tb, ty) = self.block(cx, b, value, want);
+                cx.unsafe_depth -= 1;
+                mk(TK::Block(tb), ty)
             }
             ExprKind::Block(b) => {
                 let (tb, ty) = self.block(cx, b, value, want);
@@ -1426,10 +1415,6 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Closure { params, body } => self.closure(cx, params, body, span, want),
             ExprKind::Return(v) => {
-                if self.in_lock(cx) {
-                    self.err(file, span, "`return` can't be used in a `lock` block; compute the value in the block and return after it");
-                    return self.error_expr(span);
-                }
                 if cx.fr().name == PAR_FRAME {
                     self.err(file, span, "`return` can't be used in a `par` statement, since the statements run at the same time; return after the `par`");
                     return self.error_expr(span);
@@ -1458,11 +1443,7 @@ impl<'a> Checker<'a> {
                 mk(TK::Return(tv.map(Box::new)), Ty::Never)
             }
             ExprKind::Break | ExprKind::Continue => {
-                let frame = cx.frames.len() - 1;
-                let open = cx.fr().loops.len();
-                if cx.locks.last().is_some_and(|&(f, loops)| f == frame && loops == open) {
-                    self.err(file, span, "`break` and `continue` can't leave a `lock` block; finish the block, then break");
-                } else if cx.fr().loops.is_empty() {
+                if cx.fr().loops.is_empty() {
                     self.err(file, span, "`break` and `continue` only work inside a loop");
                 } else if matches!(e.kind, ExprKind::Break) {
                     *cx.frame().loops.last_mut().unwrap() = true;
@@ -2096,6 +2077,7 @@ fn defaults_for_display(infer: &Infer, t: &Ty) -> Ty {
         },
         Ty::Array(e) => Ty::array(defaults_for_display(infer, e)),
         Ty::Opt(e) => Ty::opt(defaults_for_display(infer, e)),
+        Ty::Ptr(e) => Ty::Ptr(Box::new(defaults_for_display(infer, e))),
         Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| defaults_for_display(infer, t)).collect()),
         Ty::Adt(id, ts) => Ty::Adt(*id, ts.iter().map(|t| defaults_for_display(infer, t)).collect()),
         other => other.clone(),

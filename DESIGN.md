@@ -54,6 +54,13 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 | `http` is written in Overt, on top of `net` | It's the biggest Overt program there is, so it tests the language; handlers are ordinary code | A C parser like picohttpparser |
 | A request body is `str`; one that isn't UTF-8 gets a 400 | JSON APIs, which is what milestone 4 is | `[u8]` bodies, which every JSON handler would have to convert |
 | `http.serve` turns failures into `{"error": msg}` | The usual shape of a JSON API's errors, so most handlers never build an error response | Plain-text error bodies |
+| A `lock` block may do `io`, and any way out of it unlocks | A database connection that request tasks share lives in a `Shared`, and every query is `io`. The unlock is a cleanup, run on `return`, failure and `break` like drops | No `io` and no early exits in `lock`, the rule until milestone 5, which forced a pool or an owner task for every shared resource |
+| `unsafe` is for calling C, `unsafe fn`s and pointer operations; holding a pointer is safe | A struct can hold a pointer and be built anywhere; the danger is in reading through it | Any use of a pointer needing `unsafe` (the first spec) |
+| C calls have `io`, take arguments by position, and can't fail | C can do anything. Its APIs are positional, and imported parameters often have no names | Pure C calls; the named-argument rule for C |
+| `inout v` for a `*T` parameter passes the address of `v` | Out-parameters are how C returns things, and `inout` already means "the callee changes my variable" | An address-of operator; `ffi.addr(v)` |
+| `s.c_str()` lives until the end of its block | `let p = s.c_str()` and using `p` on later lines just works | Until the end of the statement (a trap for `let`); a raw allocation to free |
+| Resources can't be in arrays, maps, sets, closures or generic code | All of those copy their values, and making them move-aware is a big feature for a few uses | Move-aware generics |
+| Headers are read by running clang (`-ast-dump=json` and `-E -dD`) | clang is needed to build anyway, and the compiler stays free of dependencies | Linking libclang |
 
 ## Memory model
 
@@ -215,18 +222,42 @@ The runtime is C, in `runtime/rt.c`, compiled with every program. Milestone 2 bu
   - Each wait still goes through the poller thread: a message, a kqueue registration, and a wake-up from another thread. That's CPU the server could save; see the open questions.
   - Lists beat Go's, likely because Go's `encoding/json` works by reflection, while Overt's encoder is generated code writing into one string.
   - The benchmark's Go and Rust (`axum`) numbers will come from the agents' programs, like the other tasks'.
+- **Measured on `todo_sqlite`** (milestone 5's reference server: one connection in a `Shared`, the write-ahead log, a prepared statement per query), with `tasks/05-todo-sqlite/tests/perf.py`, the same loads as `todo` (load average 15–20 from other work):
+
+  | Server | Reads/s | Read p99 | Updates/s | Update p99 | Lists/s (500 todos each) | Peak memory |
+  |---|---|---|---|---|---|---|
+  | Overt | 83,400 | 0.95 ms | 66,800 | 0.95 ms | 16,900 | 5.5 MiB |
+  | Overt, `sqlite3_step` marked `blocking` | 40,300 | 1.5 ms | 30,200 | 2.2 ms | 311 | 4.8 MiB |
+  | Python `ThreadingHTTPServer` and `sqlite3` | 17,100 | 4.2 ms | 12,900 | 11.8 ms | 1,700 | 25.3 MiB |
+
+  An update commits before it responds, so the server can be killed at any time; with the write-ahead log and `synchronous = normal`, a commit writes to the log without waiting for the disk.
 - **Blocking C calls (milestone 5).** `blocking` extern calls run on the blocking pool while the task parks. Non-blocking extern calls run on the task stack, so heavy C work should be marked `blocking`.
 
 ## C interop
 
-- `extern "lib" { ... }` declares the symbols and adds `-llib` to the link.
-- `header "x.h"`:
-  - At build time, libclang parses the header and generates extern declarations for functions, structs (C layout), enums (integer constants) and integer `#define`s.
-  - Macros with arguments and varargs functions are skipped and reported.
-  - Generated declarations are cached in the build directory and visible to `ovt outline`.
-- Only C-compatible types may appear in extern signatures: numbers, `bool`, `*T`, and structs of those. `str`, arrays, enums and optionals may not.
-- `s.c_str()` allocates a NUL-terminated copy. Keeping it alive while C uses the pointer is the `unsafe` code's job.
-- **Not in v0:** callbacks from C into Overt. They'd need exported C-ABI functions and a rule for code running on a thread that has no task.
+- **Declarations.** `extern "lib" { ... }` declares C functions and opaque C types, and adds `-llib` to the link (`"c"` adds nothing). A C function's symbol is its C name.
+  - Parameters and results can be numbers, `bool`, and pointers `*T`. Passing a struct by value isn't supported: it needs the C ABI's rules for classifying structs.
+  - `i8`, `i16`, `u8`, `u16` and `bool` get `signext` or `zeroext`, since arm64 macOS extends them in the caller.
+  - C types are empty structs marked opaque; naming one outside `*T` is an error.
+- **`unsafe`.** Calling a C function, an `unsafe fn`, or one of `ffi`'s pointer operations needs an `unsafe` block or an `unsafe fn`. The checker counts the enclosing blocks; nothing else changes inside one.
+- **Pointers** are plain values (`ptr` in LLVM): compared with `==`, hashed and printed, but not ordered or turned into JSON. `ffi` has `null`, `is_null`, `to_ptr` and `address`, and the unsafe `read`, `write`, `offset`, `string`, `bytes` and `data`.
+- **`c_str()`** copies the string with a NUL into a buffer that's dropped at the end of the enclosing block, so it's inlined at the call site rather than being a function.
+- **`blocking`.** The arguments go into a struct on the task's stack, and a generated thunk makes the call on the blocking pool while the task parks. The trip costs about 6.4 µs (a plain call to `getpid` costs 1 ns), so only calls that can wait long should be blocking. On `todo_sqlite`, marking `sqlite3_step` blocking cut lists of 500 rows from 16,900 to 311 a second: a trip per row, with the database lock held.
+- **Headers.** `extern "lib" header "x.h"` runs clang twice.
+  - `-E -dD` gives the macros, and a hash of its output keys the cache, so an unchanged header isn't parsed again.
+  - `-ast-dump=json` gives the declarations, read with a small JSON parser (`cjson.rs`).
+  - Functions come from the header file itself (clang's `includedFrom` is our generated `.c` file). Typedefs are followed through all included files.
+  - Every struct becomes an opaque type. Enum constants, and `#define`s that evaluate to integers (`|`, `<<`, parentheses and other constants included), become constants typed `ffi.int` when they fit.
+  - Variadic functions, `va_list`, and structs passed by value are skipped, with a list at the end of the generated file.
+  - The result is Overt source in `.ovt/build/headers/`, a file of the declaring module. Declarations in a block after the header replace the generated ones. `sqlite3.h` gives 280 functions and 507 constants; the first build takes about 0.4 s longer.
+- **Resources** (`check/moves.rs`). A type with `drop`, or holding one, is a resource.
+  - A pass over the finished bodies follows codegen's rules for which uses take a value and which read it. A resource local used where a value is taken moves, and later uses are errors. So are moves inside a loop (except in a `return`), moves out of fields, parameters, `inout` places and pattern bindings, and captures by closures.
+  - Branches merge conservatively: moved on any branch that continues means moved.
+  - Arrays, maps, sets and type arguments (except `Shared` and `Chan`) can't hold resources.
+  - Codegen gives each resource local a drop flag. A move clears it, assigning sets it, and scope cleanup drops the value only if it's set. The dup helper of a resource traps, as an internal error.
+  - The drop helper calls the `drop` block, then drops the fields.
+- **Task stacks for `leaks`.** Task stacks are mappings tagged `VM_MEMORY_STACK`, which `leaks` scans for pointers. Untagged, values only a parked task referenced (like `main`'s `os.args()`) showed up as leaks. Heap-allocated stacks also fixed that, but took idle `chat` connections from 34 KiB to 125 KiB.
+- **Not in v0:** callbacks from C into Overt, which need exported C-ABI functions and a rule for code running on a thread that has no task. Struct fields for C structs, and fixed-size arrays.
 
 ## Codegen and performance
 
@@ -248,9 +279,10 @@ The compiler (`compiler/`) is written in Rust with no dependencies. Its stages:
    - `body.rs` and `call.rs`: bodies, with bidirectional checking and unification (`infer.rs`) inside each function. Closures are checked in their own frame and capture what they use from outside.
    - `pat.rs`: patterns, and exhaustiveness with the usefulness algorithm, which also gives an example of a missing case.
    - `zonk.rs`: resolves inferred types, defaults literals, checks `Eq`/`Ord`/`Hash`/`Json` constraints.
+   - `moves.rs`: resources, checked on the finished bodies.
    - The result is the typed program (`tir.rs`), whose types may still contain generic parameters.
 4. **`codegen`**: textual LLVM IR. Each function is emitted once per set of type arguments, from a work queue, along with per-type helpers (`helpers.rs`), JSON encoders and decoders (`json.rs`), `match` (`pat.rs`), intrinsics including `task.map` (`intrin.rs`) and `par` (`par.rs`).
-5. **clang**: compiles the IR together with the runtime (`runtime/rt.c`, embedded in `ovt`).
+5. **clang**: compiles the IR together with the runtime (`runtime/rt.c`, embedded in `ovt`), and reads C headers for `extern ... header` (`cheader.rs`, before checking).
 
 Diagnostics are one line each, with the fix in the message when one is known. Planned: `--json` output, and `ovt put` and `ovt q` on the same front end.
 
@@ -416,6 +448,8 @@ The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone l
 ## Open questions
 
 - Chase-Lev deques instead of mutex run queues, if the mutexes show up in profiles.
+- Blocking C calls that don't cost a thread switch: run them on the worker, and hand its other tasks to a new thread only if the call takes long, as Go does with system calls. Then every C call could be treated as blocking.
+- Resources in generic code, which needs generics that move instead of copying.
 - Poll from idle workers instead of a separate poller thread, and register each socket with kqueue once instead of on every wait. That saves a message, a system call and a thread hop per wait.
 - A dynamic `json.Value`, for JSON whose shape isn't known ahead of time. JSON field names other than the Overt field's, like `camelCase` ones.
 - An HTTP client, streaming request and response bodies, and binary bodies.

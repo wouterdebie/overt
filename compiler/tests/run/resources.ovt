@@ -1,0 +1,85 @@
+// A type with `drop` is a resource: it moves instead of copying, and its
+// `drop` block runs exactly once, when the value is destroyed.
+
+type Handle { name: str }
+
+drop Handle {
+  print("drop ${self.name}")
+}
+
+type Pair { a: Handle, n: int }
+
+fn open(name: str) -> Handle {
+  return Handle(name)
+}
+
+fn show(h: Handle) ! io {
+  print("using ${h.name}")
+}
+
+fn consume(h: sink Handle) ! io {
+  print("consuming ${h.name}")
+}
+
+fn pass_through(h: sink Handle) -> Handle {
+  return h
+}
+
+fn maybe(flag: bool) -> ?Handle {
+  return if flag { open("maybe") } else { none }
+}
+
+fn pick(flag: bool) -> Handle {
+  let a = open("picked a")
+  let b = open("picked b")
+  if flag {
+    return a
+  }
+  return b
+}
+
+fn fails_after_open() ! fail {
+  let h = open("before a failure")
+  fail(.Invalid, "failed with ${h.name} open")
+}
+
+fn main() ! io, fail {
+  let a = open("a")
+  show(a)
+  consume(a)
+  print("after consume")
+  let b = open("b")
+  let c = b
+  show(c)
+  var d = open("d1")
+  d = open("d2")
+  print("reassigned")
+  let e = pass_through(open("e"))
+  show(e)
+  let p = Pair(a: open("in pair"), n: 1)
+  print(p.n)
+  if let m = maybe(true) {
+    show(m)
+  }
+  let n = maybe(false) else open("fallback")
+  show(n)
+  show(pick(true))
+  show(pick(false))
+  fails_after_open() catch err {
+    print(err.msg)
+  }
+  let s = Shared.new(open("shared"))
+  lock s as h {
+    print("locked ${h.name}")
+  }
+  let ch = Chan[Handle].new(2)
+  ch.send(open("sent"))?
+  ch.send(open("left in the channel"))?
+  let got = ch.recv() else open("none")
+  show(got)
+  for i in 0..2 {
+    let x = open("loop ${i}")
+    show(x)
+  }
+  print("end of main")
+}

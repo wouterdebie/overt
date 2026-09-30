@@ -26,6 +26,7 @@ pub const FILES: &[StdFile] = &[
     StdFile { name: "time", module: Some("time"), text: include_str!("../../std/time.ovt") },
     StdFile { name: "json", module: Some("json"), text: include_str!("../../std/json.ovt") },
     StdFile { name: "http", module: Some("http"), text: include_str!("../../std/http.ovt") },
+    StdFile { name: "ffi", module: Some("ffi"), text: include_str!("../../std/ffi.ovt") },
 ];
 
 /// Module names reserved by the standard library, including ones planned for

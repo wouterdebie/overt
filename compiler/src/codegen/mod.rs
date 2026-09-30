@@ -24,7 +24,7 @@ use crate::types::{AdtId, Eff, FloatTy, FnId, IntTy, Ty};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt::Write;
 
-pub use func::Fx;
+pub use func::{Cleanup, Fx};
 
 pub enum Entry {
     Main,
@@ -108,6 +108,10 @@ pub struct Gen<'p> {
     cstrs: HashMap<Vec<u8>, String>,
     cstr_defs: Vec<String>,
     decls: BTreeSet<String>,
+    /// Types that are resources: they have a `drop`, or contain a type that does.
+    resources: std::collections::HashSet<AdtId>,
+    /// C functions that have a blocking-pool thunk already.
+    blocking_thunks: std::collections::HashSet<FnId>,
     pub f: Fx,
 }
 
@@ -136,6 +140,8 @@ pub fn emit(p: &Program, srcs: &[&Source], entry: Entry) -> String {
         cstrs: HashMap::new(),
         cstr_defs: Vec::new(),
         decls: BTreeSet::new(),
+        blocking_thunks: std::collections::HashSet::new(),
+        resources: resource_adts(p),
         f: Fx::default(),
     };
     let main_body = match entry {
@@ -212,6 +218,11 @@ declare i32 @ovt_net_connect(ptr, ptr, ptr)
 declare i32 @ovt_net_accept(ptr, ptr, ptr)
 declare i32 @ovt_net_read_line(ptr, ptr, i32, ptr, ptr)
 declare i32 @ovt_net_read(ptr, ptr, ptr)
+declare void @ovt_sb_ptr(ptr, ptr)
+declare ptr @ovt_c_str(ptr, ptr)
+declare i32 @ovt_ffi_string(ptr, ptr)
+declare void @ovt_ffi_bytes(ptr, ptr, i64)
+declare void @ovt_blocking(ptr, ptr)
 declare void @ovt_sb_json_str(ptr, ptr)
 declare void @ovt_sb_json_f64(ptr, double)
 declare ptr @ovt_jp_new(ptr)
@@ -403,7 +414,20 @@ impl<'p> Gen<'p> {
 
     // ---- types ----
 
+    /// A resource: it can only move, and it's destroyed exactly once.
+    pub fn is_resource(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Adt(id, _) => self.resources.contains(id),
+            Ty::Opt(e) => self.is_resource(e),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.is_resource(t)),
+            _ => false,
+        }
+    }
+
     pub fn needs_rc(&self, t: &Ty) -> bool {
+        if self.is_resource(t) {
+            return true;
+        }
         match t {
             Ty::Str | Ty::Array(_) | Ty::Fn(_) => true,
             Ty::Opt(e) => self.needs_rc(e),
@@ -432,6 +456,7 @@ impl<'p> Gen<'p> {
             Ty::Error | Ty::Var(_) | Ty::Param(_) => "?".into(),
             Ty::Array(e) => format!("[{}]", self.mangle(e)),
             Ty::Opt(e) => format!("?{}", self.mangle(e)),
+            Ty::Ptr(e) => format!("*{}", self.mangle(e)),
             Ty::Tuple(ts) => format!("({})", ts.iter().map(|t| self.mangle(t)).collect::<Vec<_>>().join(",")),
             Ty::Adt(id, ts) => {
                 let a = &self.p.adts[*id];
@@ -464,6 +489,7 @@ impl<'p> Gen<'p> {
             Ty::Dur => "i64".into(),
             Ty::Str | Ty::Array(_) => "%ovt.arr".into(),
             Ty::Fn(_) => "%ovt.fn".into(),
+            Ty::Ptr(_) => "ptr".into(),
             Ty::Unit | Ty::Never | Ty::Error | Ty::Var(_) | Ty::Param(_) => "{}".into(),
             Ty::Opt(e) => format!("{{ i1, {} }}", self.lty(e)),
             Ty::Tuple(ts) => {
@@ -540,6 +566,7 @@ impl<'p> Gen<'p> {
             Ty::Bool => (1, 1),
             Ty::Str | Ty::Array(_) => (24, 8),
             Ty::Fn(_) => (16, 8),
+            Ty::Ptr(_) => (8, 8),
             Ty::Unit | Ty::Never | Ty::Error | Ty::Var(_) | Ty::Param(_) => (0, 1),
             Ty::Opt(e) => self.struct_layout(&[(false, Ty::Bool), (false, (**e).clone())]),
             Ty::Tuple(ts) => {
@@ -599,6 +626,9 @@ impl<'p> Gen<'p> {
 
     /// The symbol of function `f` instantiated with `targs`, queued for emission.
     pub fn fn_inst(&mut self, f: FnId, targs: &[Ty], eargs: &[Eff]) -> String {
+        if self.p.fns[f].ext.is_some() {
+            return self.c_fn(f);
+        }
         let failable = self.p.fns[f].eff.subst(eargs).fail;
         let key = (f, targs.to_vec(), failable);
         if let Some(s) = self.fn_insts.get(&key) {
@@ -616,6 +646,62 @@ impl<'p> Gen<'p> {
         self.fn_insts.insert(key, sym.clone());
         self.queue.push_back(Work::Fn { f, targs: targs.to_vec(), eargs: eargs.to_vec(), sym: sym.clone() });
         sym
+    }
+
+    /// A C function's symbol, declared for LLVM with C's calling convention.
+    pub fn c_fn(&mut self, f: FnId) -> String {
+        let def = &self.p.fns[f];
+        let (name, params, ret) = (def.symbol.clone(), def.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(), def.ret.clone());
+        let ps: Vec<String> = params.iter().map(|t| format!("{}{}", self.lty(t), c_attr(t))).collect();
+        let rt = self.c_ret(&ret);
+        self.decls.insert(format!("declare {rt} @{name}({})", ps.join(", ")));
+        format!("@{name}")
+    }
+
+    /// The function the blocking pool runs for a `blocking` C function: it
+    /// takes a pointer to `{ result, args... }`, makes the call and stores
+    /// the result.
+    pub fn blocking_thunk(&mut self, f: FnId) -> (String, String) {
+        let def = &self.p.fns[f];
+        let (name, ptys, ret) = (def.symbol.clone(), def.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(), def.ret.clone());
+        let rlt = if ret == Ty::Unit { "i8".to_string() } else { self.lty(&ret) };
+        let mut fields = vec![rlt.clone()];
+        fields.extend(ptys.iter().map(|t| self.lty(t)));
+        let st = format!("{{ {} }}", fields.join(", "));
+        let sym = format!("@\"blocking.{name}\"");
+        if self.blocking_thunks.insert(f) {
+            let mut code = String::new();
+            let mut ops = Vec::new();
+            for (i, t) in ptys.iter().enumerate() {
+                let lt = self.lty(t);
+                let _ = writeln!(code, "  %p{i} = getelementptr inbounds {st}, ptr %a, i32 0, i32 {}", i + 1);
+                let _ = writeln!(code, "  %v{i} = load {lt}, ptr %p{i}");
+                ops.push(format!("{lt}{} %v{i}", c_attr(t)));
+            }
+            let rt = self.c_ret(&ret);
+            if ret == Ty::Unit {
+                let _ = writeln!(code, "  call void @{name}({})", ops.join(", "));
+            } else {
+                let _ = writeln!(code, "  %r = call {rt} @{name}({})", ops.join(", "));
+                let _ = writeln!(code, "  %rp = getelementptr inbounds {st}, ptr %a, i32 0, i32 0");
+                let _ = writeln!(code, "  store {rlt} %r, ptr %rp");
+            }
+            let _ = writeln!(code, "  ret void");
+            self.body.push_str(&format!("define internal void {sym}(ptr %a) {{\nentry:\n{code}}}\n\n"));
+        }
+        (sym, st)
+    }
+
+    /// A C result type with its attribute, like `zeroext i1`.
+    pub fn c_ret(&mut self, t: &Ty) -> String {
+        if *t == Ty::Unit {
+            return "void".into();
+        }
+        let lt = self.lty(t);
+        match c_attr(t) {
+            "" => lt,
+            a => format!("{} {lt}", a.trim_start()),
+        }
     }
 
     pub fn fn_failable(&self, f: FnId, eargs: &[Eff]) -> bool {
@@ -791,6 +877,42 @@ impl<'p> Gen<'p> {
         }
         s.push_str("  %status = call i32 @ovt_test_finish()\n  ret i32 %status\n}\n");
         wrappers + &s
+    }
+}
+
+/// The types that are resources, as a fixed point: a type with a `drop`, or
+/// whose fields hold a resource. (Type arguments can't be resources, except
+/// to handles, which aren't resources themselves.)
+fn resource_adts(p: &Program) -> std::collections::HashSet<AdtId> {
+    fn holds(t: &Ty, set: &std::collections::HashSet<AdtId>) -> bool {
+        match t {
+            Ty::Adt(id, _) => set.contains(id),
+            Ty::Opt(e) => holds(e, set),
+            Ty::Tuple(ts) => ts.iter().any(|t| holds(t, set)),
+            _ => false,
+        }
+    }
+    let mut set: std::collections::HashSet<AdtId> = p.adts.iter().enumerate().filter(|(_, a)| a.drop.is_some()).map(|(i, _)| i).collect();
+    loop {
+        let before = set.len();
+        for (i, a) in p.adts.iter().enumerate() {
+            if !set.contains(&i) && (a.fields().iter().any(|f| holds(&f.ty, &set)) || a.variants().iter().flat_map(|v| v.fields.iter()).any(|f| holds(&f.ty, &set))) {
+                set.insert(i);
+            }
+        }
+        if set.len() == before {
+            return set;
+        }
+    }
+}
+
+/// The attribute C needs on an argument or result of type `t`: arm64 macOS
+/// extends small integers to 32 bits in the caller.
+pub fn c_attr(t: &Ty) -> &'static str {
+    match t {
+        Ty::Int(IntTy::I8 | IntTy::I16) => " signext",
+        Ty::Int(IntTy::U8 | IntTy::U16) | Ty::Bool => " zeroext",
+        _ => "",
     }
 }
 

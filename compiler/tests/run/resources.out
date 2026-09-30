@@ -1,0 +1,35 @@
+using a
+consuming a
+drop a
+after consume
+using b
+drop d1
+reassigned
+using e
+1
+using maybe
+drop maybe
+using fallback
+drop picked b
+using picked a
+drop picked a
+drop picked a
+using picked b
+drop picked b
+drop before a failure
+failed with before a failure open
+locked shared
+using sent
+using loop 0
+drop loop 0
+using loop 1
+drop loop 1
+end of main
+drop sent
+drop left in the channel
+drop shared
+drop fallback
+drop in pair
+drop e
+drop d2
+drop b

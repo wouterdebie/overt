@@ -129,7 +129,7 @@ An in-memory todo service:
 Milestone 4's service, with the todos stored in sqlite.
 
 **Needs**
-- `extern` blocks, and header import through libclang.
+- `extern` blocks, and header import through clang.
 - `blocking` calls, and resources with `drop`.
 - `ffi` in the standard library (C types and pointer operations), and `c_str()`.
 

@@ -1,0 +1,8 @@
+resource_rules.ovt:7:12: error: this field is an array of `Handle`, a resource; arrays copy their elements, so they can't hold resources
+resource_rules.ovt:16:10: error: `h` is a parameter the caller keeps; to take it, declare it `h: sink Handle` (`Handle` is a resource, which can't be copied)
+resource_rules.ovt:26:11: error: `a` was moved away on line 25, so it can't be used here; `Handle` is a resource, which can't be copied
+resource_rules.ovt:28:11: error: a closure can't use `b`: closures copy what they use, and `Handle` is a resource
+resource_rules.ovt:30:15: error: a field that's a resource (`Handle`) can't be moved out of its value; move the whole value
+resource_rules.ovt:33:13: error: `c` is moved inside a loop, so it would be gone the next time around; move it after the loop, or declare it inside
+resource_rules.ovt:35:11: error: `first` can't take `Handle`, a resource, as a type argument: generic code copies its values; only `Shared` and `Chan` can hold resources
+resource_rules.ovt:40:9: error: `e` was moved away on line 38, so it can't be used here; `Handle` is a resource, which can't be copied

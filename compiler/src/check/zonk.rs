@@ -88,6 +88,11 @@ impl<'a> Checker<'a> {
                 (!has).then(|| format!(" (add the constraint: `{}: {bound}`)", g.name))
             }
             Ty::Fn(_) => Some(" (it's a function)".into()),
+            Ty::Ptr(_) => match bound {
+                "Eq" | "Hash" => None,
+                "Ord" => Some(" (pointers aren't ordered)".into()),
+                _ => Some(" (it's a raw pointer)".into()),
+            },
             Ty::Array(e) | Ty::Opt(e) => self.lacks_in(e, bound, generics, seen),
             Ty::Tuple(ts) => all(ts, seen),
             Ty::Adt(id, targs) => {
@@ -357,6 +362,7 @@ fn subst_vars(t: &Ty) -> Ty {
         Ty::Var(_) => Ty::Error,
         Ty::Array(e) => Ty::Array(Box::new(subst_vars(e))),
         Ty::Opt(e) => Ty::Opt(Box::new(subst_vars(e))),
+        Ty::Ptr(e) => Ty::Ptr(Box::new(subst_vars(e))),
         Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(subst_vars).collect()),
         Ty::Adt(id, ts) => Ty::Adt(*id, ts.iter().map(subst_vars).collect()),
         Ty::Fn(f) => Ty::Fn(Box::new(FnTy { params: f.params.iter().map(subst_vars).collect(), ret: subst_vars(&f.ret), eff: f.eff.clone() })),

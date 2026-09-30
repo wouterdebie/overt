@@ -1,0 +1,7 @@
+ffi_rules.ovt:4:11: error: a `str` can't be passed to C; use `*u8` and pass `s.c_str()`
+ffi_rules.ovt:5:16: error: `FILE` is a C type, so it's used behind a pointer: `*FILE`
+ffi_rules.ovt:6:11: error: passing a struct to C by value isn't supported by this compiler yet; use a pointer: `*Point`
+ffi_rules.ovt:7:12: error: C takes its arguments by value; use a pointer type, like `*T`, and pass `inout x`
+ffi_rules.ovt:17:11: error: `strlen` is a C function; call it inside `unsafe { ... }`
+ffi_rules.ovt:18:11: error: `peek` is an `unsafe fn`; call it inside `unsafe { ... }`
+ffi_rules.ovt:19:11: error: `ffi.read` is an `unsafe fn`; call it inside `unsafe { ... }`

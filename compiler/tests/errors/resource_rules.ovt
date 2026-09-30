@@ -1,0 +1,41 @@
+type Handle { name: str }
+
+drop Handle {
+  print("drop ${self.name}")
+}
+
+type Bag { items: [Handle] }
+
+type Wrap { h: Handle }
+
+fn consume(h: sink Handle) ! io {
+  print(h.name)
+}
+
+fn keep(h: Handle) -> Handle {
+  return h
+}
+
+fn first[T](x: T) -> T {
+  return x
+}
+
+fn main() ! io {
+  let a = Handle(name: "a")
+  consume(a)
+  consume(a)
+  let b = Handle(name: "b")
+  let f = || print(b.name)
+  let w = Wrap(h: Handle(name: "w"))
+  let inner = w.h
+  let c = Handle(name: "c")
+  for i in 0..3 {
+    consume(c)
+  }
+  let d = first(Handle(name: "d"))
+  let e = Handle(name: "e")
+  if true {
+    consume(e)
+  }
+  print(e.name)
+}

@@ -1,7 +1,4 @@
-fn main() ! io, fail {
-  let n: ffi.int = 3
+fn main() ! io {
   let raw: [u8; 4] = [0, 0, 0, 0]
-  unsafe {
-    print(raw)
-  }
+  print(raw)
 }

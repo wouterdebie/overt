@@ -1,2 +1,2 @@
 closure_fail.ovt:6:40: error: `load` can fail; handle it with `?`, `else` or `catch`; in a closure, `?` passes the failure on to whatever calls the closure, like `task.map(xs, |x| f(x)?)?`
-closure_fail.ovt:7:10: error: fixed-size arrays `[T; N]` aren't supported by this compiler yet (planned for milestone 5); use an array `[T]`, like `[u32(0)].repeat(64)`
+closure_fail.ovt:7:10: error: fixed-size arrays `[T; N]` aren't supported by this compiler yet; use an array `[T]`, like `[u32(0)].repeat(64)`

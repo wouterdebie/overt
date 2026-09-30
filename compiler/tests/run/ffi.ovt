@@ -1,0 +1,46 @@
+// Calling C: libc through an `extern` block, pointers, `c_str`, `inout`
+// out-parameters and a `blocking` call.
+
+extern "c" {
+  type FILE
+  fn strlen(s: *u8) -> ffi.size
+  fn abs(n: ffi.int) -> ffi.int
+  fn toupper(c: ffi.int) -> ffi.int
+  fn memcpy(dst: *u8, src: *u8, n: ffi.size) -> *u8
+  fn strtol(s: *u8, end: **u8, base: ffi.int) -> ffi.long
+  fn getenv(name: *u8) -> *u8
+  blocking fn usleep(us: ffi.uint) -> ffi.int
+}
+
+fn upper(s: str) -> str ! io, fail {
+  var out = s.bytes()
+  for inout b in out {
+    b = u8(unsafe { toupper(ffi.int(b)) })
+  }
+  return str.from_bytes(out)?
+}
+
+fn main() ! io, fail {
+  print(unsafe { strlen("héllo".c_str()) })
+  print(unsafe { abs(-42) })
+  print(upper("overt")?)
+  var buf = [u8(0)].repeat(5)
+  let text = "bytes"
+  unsafe {
+    _ = memcpy(ffi.data(buf), text.c_str(), 5)
+  }
+  print(str.from_bytes(buf)?)
+  var end: *u8 = ffi.null()
+  let digits = "123abc".c_str()
+  let n = unsafe { strtol(digits, inout end, 10) }
+  print(n)
+  print(unsafe { ffi.string(end)? })
+  print(ffi.address(end) - ffi.address(digits))
+  print(ffi.is_null(unsafe { getenv("OVERT_SURELY_UNSET".c_str()) }))
+  print(unsafe { usleep(1000) })
+  let p = ffi.to_ptr[u8](0)
+  print(p == ffi.null())
+  print(p)
+  let one = [7, 8, 9]
+  print(unsafe { ffi.read(ffi.offset(ffi.data(one), 2)) })
+}

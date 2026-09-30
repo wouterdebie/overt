@@ -1,0 +1,167 @@
+// todo <port>: an HTTP JSON API for a list of todos, kept in the sqlite
+// database todos.db in the current directory.
+
+type Todo { id: int, title: str, done: bool }
+
+// The body of a POST; the title is checked separately, so it may be missing.
+type NewTodo { title: ?str, done: ?bool }
+
+// The body of a PATCH: the fields to change.
+type Change { title: ?str, done: ?bool }
+
+type Problem { error: str }
+
+fn main() ! io, fail {
+  let args = os.args()
+  if args.len() != 1 {
+    fail(.Invalid, "usage: todo <port>")
+  }
+  let port = int.parse(args[0]) else fail(.Invalid, "the port must be a number")
+  if port < 1 || port > 65535 {
+    fail(.Invalid, "the port must be from 1 to 65535")
+  }
+  let db = sqlite.Db.open("todos.db")?
+  // WAL keeps each commit in the log file before it returns, so a killed
+  // server loses nothing it confirmed.
+  db.exec("pragma journal_mode = wal; pragma synchronous = normal")?
+  db.exec("create table if not exists todos (id integer primary key autoincrement, title text not null, done integer not null)")?
+  let store = Shared.new(db)
+  http.serve("127.0.0.1:${port}", |req| route(req, store)?)?
+}
+
+fn route(req: http.Req, store: Shared[sqlite.Db]) -> http.Resp ! io, fail {
+  let parts = req.path_parts()
+  if parts == ["todos"] {
+    return match req.method {
+      "GET" => http.json(200, list(store, done_filter(req.query)?)?)
+      "POST" => http.json(201, create(store, json.decode[NewTodo](req.body)?)?)
+      _ => not_allowed()
+    }
+  }
+  if parts.len() == 2 && parts[0] == "todos" {
+    // Ids that aren't positive integers name no todo.
+    let id = int.parse(parts[1]) else 0
+    return match req.method {
+      "GET" => http.json(200, get(store, id)?)
+      "PATCH" => http.json(200, change(store, id, body: req.body)?)
+      "DELETE" => {
+        delete(store, id)?
+        http.empty(204)
+      }
+      _ => not_allowed()
+    }
+  }
+  fail(.NotFound, "no such path")
+}
+
+fn not_allowed() -> http.Resp {
+  return http.json(405, Problem(error: "method not allowed"))
+}
+
+// `none` for all todos, or whether to list the done ones.
+fn done_filter(query: str) -> ?bool ! fail
+  ex done_filter("")? == none
+  ex done_filter("done=true")? == true
+  ex done_filter("done=yes") fails .Invalid
+{
+  return match query {
+    "" => none
+    "done=true" => true
+    "done=false" => false
+    _ => fail(.Invalid, "the query must be done=true or done=false")
+  }
+}
+
+// A title without its leading and trailing spaces, if it has 1 to 200 characters.
+fn valid_title(title: str) -> str ! fail
+  ex valid_title("  milk ")? == "milk"
+  ex valid_title("   ") fails .Invalid
+{
+  var start = 0
+  var end = title.len()
+  while start < end && title[start] == ' ' {
+    start += 1
+  }
+  while end > start && title[end - 1] == ' ' {
+    end -= 1
+  }
+  let t = title[start..end]
+  let n = t.runes().len()
+  if n < 1 || n > 200 {
+    fail(.Invalid, "the title must have 1 to 200 characters")
+  }
+  return t
+}
+
+// The todo in the statement's current row: id, title, done.
+fn row(s: sqlite.Stmt) -> Todo ! io, fail {
+  return Todo(id: s.int(0), title: s.text(1)?, done: s.int(2) != 0)
+}
+
+fn list(store: Shared[sqlite.Db], done: ?bool) -> [Todo] ! io, fail {
+  return lock store as d {
+    let s = if let want = done {
+      let st = d.prepare("select id, title, done from todos where done = ? order by id")?
+      st.bind_int(1, v: if want { 1 } else { 0 })?
+      st
+    } else {
+      d.prepare("select id, title, done from todos order by id")?
+    }
+    var out: [Todo] = []
+    while s.step()? {
+      out.push(row(s)?)
+    }
+    out
+  }
+}
+
+fn create(store: Shared[sqlite.Db], n: NewTodo) -> Todo ! io, fail {
+  let title = valid_title(n.title else fail(.Invalid, "the title is missing"))?
+  let done = n.done else false
+  return lock store as d {
+    let s = d.prepare("insert into todos (title, done) values (?, ?)")?
+    s.bind_text(1, title)?
+    s.bind_int(2, v: if done { 1 } else { 0 })?
+    _ = s.step()?
+    Todo(id: d.last_id(), title, done)
+  }
+}
+
+// The todo with this id, in a locked database.
+fn find(d: sqlite.Db, id: int) -> ?Todo ! io, fail {
+  let s = d.prepare("select id, title, done from todos where id = ?")?
+  s.bind_int(1, v: id)?
+  return if s.step()? { row(s)? } else { none }
+}
+
+fn get(store: Shared[sqlite.Db], id: int) -> Todo ! io, fail {
+  let t = lock store as d { find(d, id)? }
+  return t else fail(.NotFound, "no todo ${id}")
+}
+
+fn change(store: Shared[sqlite.Db], id: int, body: str) -> Todo ! io, fail {
+  let c = json.decode[Change](body)?
+  let title = if let t = c.title { valid_title(t)? } else { none }
+  return lock store as d {
+    let old = find(d, id)? else fail(.NotFound, "no todo ${id}")
+    let t = Todo(id, title: title else old.title, done: c.done else old.done)
+    let s = d.prepare("update todos set title = ?, done = ? where id = ?")?
+    s.bind_text(1, t.title)?
+    s.bind_int(2, v: if t.done { 1 } else { 0 })?
+    s.bind_int(3, v: id)?
+    _ = s.step()?
+    t
+  }
+}
+
+fn delete(store: Shared[sqlite.Db], id: int) ! io, fail {
+  let gone = lock store as d {
+    let s = d.prepare("delete from todos where id = ?")?
+    s.bind_int(1, v: id)?
+    _ = s.step()?
+    d.changes()
+  }
+  if gone == 0 {
+    fail(.NotFound, "no todo ${id}")
+  }
+}

@@ -1,0 +1,61 @@
+// A `lock` block may do io, and a failure, `return`, `break` or `continue`
+// may leave it; it unlocks on the way out. Locking again after each exit
+// would trap if it hadn't.
+
+type Box { n: int, log: [str] }
+
+fn parse_in_lock(s: Shared[Box], text: str) -> int ! fail {
+  return lock s as b {
+    b.log.push("parse ${text}")
+    int.parse(text)?
+  }
+}
+
+fn first_above(s: Shared[Box], xs: [int]) -> int {
+  for x in xs {
+    lock s as b {
+      if x > b.n {
+        return x
+      }
+      b.n += 1
+    }
+  }
+  return -1
+}
+
+fn count_positive(s: Shared[Box], xs: [int]) -> int {
+  var seen = 0
+  for x in xs {
+    lock s as b {
+      if x == 0 {
+        break
+      }
+      if x < 0 {
+        continue
+      }
+      b.log.push("saw ${x}")
+      seen += 1
+    }
+  }
+  return seen
+}
+
+fn main() ! io, fail {
+  let s = Shared.new(Box(n: 0, log: []))
+  lock s as b {
+    print("io inside: ${b.n}")
+  }
+  print(parse_in_lock(s, "5")?)
+  print(parse_in_lock(s, "five") catch e { -1 })
+  print(first_above(s, [0, 0, 7]))
+  print(count_positive(s, [1, -1, 2, 0, 3]))
+  let sums = task.map([1, 2, 3], |i| lock s as b {
+    b.n += i
+    b.n
+  })
+  print(sums.len())
+  lock s as b {
+    print(b.log)
+    print(b.n)
+  }
+}
