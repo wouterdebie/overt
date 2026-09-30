@@ -155,11 +155,15 @@ pub fn is_snake(name: &str) -> bool {
     name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+// A leading `_` makes a name private, so the case rules apply to the rest.
+
 pub fn is_pascal(name: &str) -> bool {
+    let name = name.strip_prefix('_').unwrap_or(name);
     name.starts_with(|c: char| c.is_ascii_uppercase()) && name.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 pub fn is_upper(name: &str) -> bool {
+    let name = name.strip_prefix('_').unwrap_or(name);
     name.starts_with(|c: char| c.is_ascii_uppercase()) && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
@@ -182,9 +186,12 @@ pub fn to_pascal(name: &str) -> String {
     name.split('_').filter(|p| !p.is_empty()).map(|p| p[..1].to_uppercase() + &p[1..]).collect()
 }
 
+/// Functions from the spec that this compiler doesn't implement yet: (module, name, milestone).
+pub const LATER_FNS: &[(&str, &str, &str)] = &[("task", "group", "3"), ("task", "timeout", "3")];
+
 /// Types from the spec that this compiler doesn't implement yet.
-const LATER_TYPES: &[(&str, &str)] =
-    &[("Shared", "2"), ("Atomic", "2"), ("Chan", "2"), ("never", "1")];
+pub const LATER_TYPES: &[(&str, &str)] =
+    &[("Shared", "3"), ("Chan", "3"), ("never", "1")];
 
 impl<'a> Checker<'a> {
     pub fn err(&mut self, file: FileId, span: Span, msg: impl Into<String>) {
@@ -449,7 +456,7 @@ impl<'a> Checker<'a> {
                 Ty::Fn(Box::new(FnTy { params, ret, eff }))
             }
             TypeKind::Fixed(..) => {
-                self.err(file, t.span, "fixed-size arrays `[T; N]` aren't supported by this compiler yet (planned for milestone 5)");
+                self.err(file, t.span, "fixed-size arrays `[T; N]` aren't supported by this compiler yet (planned for milestone 5); use an array `[T]`, like `[u32(0)].repeat(64)`");
                 Ty::Error
             }
             TypeKind::Ptr(_) => {
@@ -508,6 +515,14 @@ impl<'a> Checker<'a> {
             }
             let found = self.lookup_type(name, file);
             match found {
+                // The spec writes `Atomic[int]`, the only kind there is.
+                Some(TypeRef::Adt(id)) if name == "Atomic" && self.files[self.adts[id].file].std && !targs.is_empty() => {
+                    if targs.len() != 1 || (targs[0] != Ty::INT && targs[0] != Ty::Error) {
+                        self.err(file, span, "only `Atomic[int]` is supported");
+                        return Ty::Error;
+                    }
+                    return self.adt_type(id, Vec::new(), file, span);
+                }
                 Some(TypeRef::Adt(id)) => return self.adt_type(id, targs, file, span),
                 Some(TypeRef::Alias(t)) => return no_args(self, t),
                 None => {}

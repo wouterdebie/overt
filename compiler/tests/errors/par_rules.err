@@ -1,0 +1,4 @@
+par_rules.ovt:4:5: error: a `par` statement can't change `n`, which is declared outside it; declare a new variable in the statement instead
+par_rules.ovt:9:13: error: `a` is declared by another statement of this `par`, and the statements run at the same time; use it after the `par`
+par_rules.ovt:12:5: error: `return` can't be used in a `par` statement, since the statements run at the same time; return after the `par`
+par_rules.ovt:18:10: error: only `Atomic[int]` is supported

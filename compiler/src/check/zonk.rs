@@ -183,6 +183,11 @@ impl Zonk<'_> {
                 self.expr(map);
                 self.block(body);
             }
+            TStmt::Par { branches } => {
+                for b in branches {
+                    self.expr(&mut b.closure);
+                }
+            }
         }
     }
 
@@ -450,6 +455,11 @@ pub fn walk_block(b: &TBlock, f: &mut dyn FnMut(&TExpr)) {
             TStmt::ForMap { map, body, .. } => {
                 walk_expr(map, f);
                 walk_block(body, f);
+            }
+            TStmt::Par { branches } => {
+                for b in branches {
+                    walk_expr(&b.closure, f);
+                }
             }
         }
     }

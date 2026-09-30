@@ -1,7 +1,7 @@
 # Working on Overt
 
 - The compiler is `compiler/` (Rust, no dependencies), the runtime is `runtime/rt.c`, and the standard library is `std/` (Overt, with bodyless intrinsics). The runtime and std are embedded into `ovt` at build time. Build and test with `cd compiler && cargo build && cargo test`.
-- `ovt test --std` runs the std's `ex` lines. `OVT_CFLAGS="-fsanitize=address -g"` builds a program with AddressSanitizer; `leaks --atExit -- <binary>` checks for leaks (not on test binaries, which fork).
+- `ovt test --std` runs the std's `ex` lines. `OVT_CFLAGS="-fsanitize=address -g"` builds a program with AddressSanitizer and `-fsanitize=thread` with ThreadSanitizer; `leaks --atExit -- <binary>` checks for leaks (not on test binaries, which fork). `OVT_WORKERS=n` sets the number of worker threads.
 - SPEC.md is everything a code-writing agent knows about Overt. It must stay under 5,000 tokens (the command is at the end of DESIGN.md), and every `ovt` code block in it must come back unchanged from `ovt fmt`; `cargo test` checks this.
 - When the language or its implementation changes, update SPEC.md and DESIGN.md in the same change. ROADMAP.md says what each milestone needs.
 - Golden tests live in `compiler/tests/`:

@@ -13,6 +13,7 @@ mod expr;
 mod func;
 mod helpers;
 mod intrin;
+mod par;
 mod pat;
 
 use crate::source::Source;
@@ -53,6 +54,8 @@ impl V {
 pub enum Helper {
     Dup,
     Drop,
+    /// Marks every count a value holds as shared, before other tasks can reach it.
+    Mark,
     Eq,
     Cmp,
     Hash,
@@ -65,6 +68,11 @@ enum Work {
     Thunk { f: FnId, targs: Vec<Ty>, eargs: Vec<Eff>, failable: bool, sym: String },
     Helper { kind: Helper, ty: Ty, sym: String },
     ClosureDrop { id: ClosureId, targs: Vec<Ty>, eargs: Vec<Eff>, sym: String },
+    ClosureMark { id: ClosureId, targs: Vec<Ty>, eargs: Vec<Eff>, sym: String },
+    /// The body `task.map` runs for each index (see `intrin.rs`).
+    MapBody { t: Ty, u: Ty, failable: bool, sym: String },
+    /// The dispatch function of a `par` (see `par.rs`).
+    ParBody { sigs: Vec<(Ty, bool)>, sym: String },
 }
 
 pub struct Gen<'p> {
@@ -77,10 +85,16 @@ pub struct Gen<'p> {
     fn_insts: HashMap<(FnId, Vec<Ty>, bool), String>,
     closure_insts: HashMap<(ClosureId, Vec<Ty>, bool, bool), String>,
     closure_drops: HashMap<(ClosureId, Vec<Ty>), String>,
+    closure_marks: HashMap<(ClosureId, Vec<Ty>), String>,
+    map_bodies: HashMap<(Ty, Ty, bool), String>,
+    par_bodies: HashMap<Vec<(Ty, bool)>, String>,
     thunks: HashMap<(FnId, Vec<Ty>, bool, bool), String>,
     helpers: HashMap<(Helper, Ty), String>,
+    helper_syms: std::collections::HashSet<String>,
     queue: VecDeque<Work>,
     strs: HashMap<Vec<u8>, String>,
+    /// Static arrays of number literals, by their initializer.
+    arrs: HashMap<String, String>,
     str_defs: Vec<String>,
     cstrs: HashMap<Vec<u8>, String>,
     cstr_defs: Vec<String>,
@@ -99,10 +113,15 @@ pub fn emit(p: &Program, srcs: &[&Source], entry: Entry) -> String {
         fn_insts: HashMap::new(),
         closure_insts: HashMap::new(),
         closure_drops: HashMap::new(),
+        closure_marks: HashMap::new(),
+        map_bodies: HashMap::new(),
+        par_bodies: HashMap::new(),
         thunks: HashMap::new(),
         helpers: HashMap::new(),
+        helper_syms: std::collections::HashSet::new(),
         queue: VecDeque::new(),
         strs: HashMap::new(),
+        arrs: HashMap::new(),
         str_defs: Vec::new(),
         cstrs: HashMap::new(),
         cstr_defs: Vec::new(),
@@ -120,6 +139,9 @@ pub fn emit(p: &Program, srcs: &[&Source], entry: Entry) -> String {
             Work::Thunk { f, targs, eargs, failable, sym } => g.emit_thunk(f, &targs, &eargs, failable, &sym),
             Work::Helper { kind, ty, sym } => g.emit_helper(kind, &ty, &sym),
             Work::ClosureDrop { id, targs, eargs, sym } => g.emit_closure_drop(id, &targs, &eargs, &sym),
+            Work::ClosureMark { id, targs, eargs, sym } => g.emit_closure_mark(id, &targs, &eargs, &sym),
+            Work::MapBody { t, u, failable, sym } => g.emit_map_body(&t, &u, failable, &sym),
+            Work::ParBody { sigs, sym } => g.emit_par_body(&sigs, &sym),
         };
         g.body.push_str(&text);
         g.body.push('\n');
@@ -159,6 +181,18 @@ declare ptr @ovt_alloc(i64)
 declare void @ovt_free(ptr)
 declare void @ovt_buf_release(ptr, i64, ptr)
 declare void @ovt_box_release(ptr, ptr)
+declare void @ovt_env_release(ptr)
+declare void @ovt_rc_inc(ptr)
+declare void @ovt_mark_buf(ptr, i64, ptr)
+declare void @ovt_mark_box(ptr, ptr)
+declare void @ovt_mark_env(ptr)
+declare void @ovt_mark_none(ptr)
+declare i32 @ovt_rt_run(ptr)
+declare i64 @ovt_parallel(i64, ptr, ptr)
+declare ptr @ovt_buf_new(i64, i64)
+declare ptr @ovt_calloc(i64)
+declare void @ovt_parallel_cleanup(ptr, i64, ptr, i64, ptr, ptr, i64)
+declare i32 @ovt_fs_list(ptr, i32, ptr, ptr)
 declare void @ovt_box_unique(ptr, i64, ptr, ptr)
 declare void @ovt_arr_unique(ptr, i64, ptr, ptr)
 declare ptr @ovt_arr_push(ptr, i64, ptr, ptr)
@@ -252,6 +286,39 @@ impl<'p> Gen<'p> {
             }
         };
         V::new("%ovt.arr", format!("{{ ptr {name}, i64 0, i64 {} }}", bytes.len()))
+    }
+
+    /// An array literal of number literals as a static buffer, like a string
+    /// literal: its count is 0, so it's never freed, and changing it copies it.
+    /// Returns `None` for any other array literal.
+    pub fn static_array(&mut self, et: &Ty, items: &[TExpr]) -> Option<V> {
+        if !matches!(et, Ty::Int(_) | Ty::Float(_)) {
+            return None;
+        }
+        let elt = self.lty(et);
+        let mut vals = Vec::new();
+        for it in items {
+            let repr = match (&it.kind, et) {
+                (TK::Int(v), Ty::Float(_)) => Self::float_const(*v as f64, et),
+                (TK::Int(v), _) if *v > i64::MAX as i128 => (*v as u64 as i64).to_string(),
+                (TK::Int(v), _) => v.to_string(),
+                (TK::Float(f), _) => Self::float_const(*f, et),
+                _ => return None,
+            };
+            vals.push(format!("{elt} {repr}"));
+        }
+        let n = items.len();
+        let init = format!("{{ i64, i64, i64, [{n} x {elt}] }} {{ i64 0, i64 {n}, i64 {n}, [{n} x {elt}] [{}] }}", vals.join(", "));
+        let name = match self.arrs.get(&init) {
+            Some(name) => name.clone(),
+            None => {
+                let name = format!("@.arr.{}", self.arrs.len());
+                self.str_defs.push(format!("{name} = private unnamed_addr constant {init}, align 8"));
+                self.arrs.insert(init, name.clone());
+                name
+            }
+        };
+        Some(V::new("%ovt.arr", format!("{{ ptr {name}, i64 0, i64 {n} }}")))
     }
 
     /// A NUL-terminated C string constant, for runtime messages.
@@ -513,6 +580,38 @@ impl<'p> Gen<'p> {
         sym
     }
 
+    pub fn closure_mark(&mut self, id: ClosureId, targs: &[Ty], eargs: &[Eff]) -> String {
+        let key = (id, targs.to_vec());
+        if let Some(s) = self.closure_marks.get(&key) {
+            return s.clone();
+        }
+        let sym = format!("@\"closure.{id}<{}>.mark\"", targs.iter().map(|t| quote_sym(&self.mangle(t))).collect::<Vec<_>>().join(","));
+        self.closure_marks.insert(key, sym.clone());
+        self.queue.push_back(Work::ClosureMark { id, targs: targs.to_vec(), eargs: eargs.to_vec(), sym: sym.clone() });
+        sym
+    }
+
+    pub fn par_body(&mut self, sigs: &[(Ty, bool)]) -> String {
+        if let Some(s) = self.par_bodies.get(sigs) {
+            return s.clone();
+        }
+        let sym = format!("@\"par.body.{}\"", self.par_bodies.len());
+        self.par_bodies.insert(sigs.to_vec(), sym.clone());
+        self.queue.push_back(Work::ParBody { sigs: sigs.to_vec(), sym: sym.clone() });
+        sym
+    }
+
+    pub fn map_body(&mut self, t: &Ty, u: &Ty, failable: bool) -> String {
+        let key = (t.clone(), u.clone(), failable);
+        if let Some(s) = self.map_bodies.get(&key) {
+            return s.clone();
+        }
+        let sym = format!("@\"task.map.body<{},{}>{}\"", quote_sym(&self.mangle(t)), quote_sym(&self.mangle(u)), if failable { ".fails" } else { "" });
+        self.map_bodies.insert(key, sym.clone());
+        self.queue.push_back(Work::MapBody { t: t.clone(), u: u.clone(), failable, sym: sym.clone() });
+        sym
+    }
+
     /// A function taking an environment pointer first, calling named function `f`.
     pub fn thunk(&mut self, f: FnId, targs: &[Ty], eargs: &[Eff], failable: bool) -> String {
         let inner = self.fn_failable(f, eargs);
@@ -535,6 +634,7 @@ impl<'p> Gen<'p> {
         let k = match kind {
             Helper::Dup => "dup",
             Helper::Drop => "drop",
+            Helper::Mark => "mark",
             Helper::Eq => "eq",
             Helper::Cmp => "cmp",
             Helper::Hash => "hash",
@@ -542,7 +642,11 @@ impl<'p> Gen<'p> {
         };
         let sym = format!("@\"{k}.{}\"", quote_sym(&self.mangle(ty)));
         self.helpers.insert((kind, ty.clone()), sym.clone());
-        self.queue.push_back(Work::Helper { kind, ty: ty.clone(), sym: sym.clone() });
+        // Types that differ only in effects (`fn() -> int` and `fn() -> int ! io`)
+        // have the same name and layout, so they share a helper.
+        if self.helper_syms.insert(sym.clone()) {
+            self.queue.push_back(Work::Helper { kind, ty: ty.clone(), sym: sym.clone() });
+        }
         sym
     }
 
@@ -555,13 +659,19 @@ impl<'p> Gen<'p> {
         if self.needs_rc(ty) { self.helper(Helper::Dup, ty) } else { "null".into() }
     }
 
+    pub fn mark_fn(&mut self, ty: &Ty) -> String {
+        if self.needs_rc(ty) { self.helper(Helper::Mark, ty) } else { "null".into() }
+    }
+
     // ---- entry points ----
 
+    /// `main` runs as the first task: `@main` starts the runtime with
+    /// `main.task`, which calls the program's `main`.
     fn main_entry(&mut self) -> String {
         let Some(main) = self.p.main else { return String::new() };
         let sym = self.fn_inst(main, &[], &[]);
         let failable = self.p.fns[main].eff.fail;
-        let mut s = String::from("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n  call void @ovt_rt_init(i32 %argc, ptr %argv)\n");
+        let mut s = String::from("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n  call void @ovt_rt_init(i32 %argc, ptr %argv)\n  %status = call i32 @ovt_rt_run(ptr @\"main.task\")\n  call void @ovt_rt_exit()\n  ret i32 0\n}\n\ndefine internal i32 @\"main.task\"() {\nentry:\n");
         if failable {
             let rt = self.ret_lty(&Ty::Unit, true);
             let et = self.err_lty();
@@ -572,7 +682,7 @@ impl<'p> Gen<'p> {
         } else {
             let _ = writeln!(s, "  call void {sym}()");
         }
-        s.push_str("  call void @ovt_rt_exit()\n  ret i32 0\n}\n");
+        s.push_str("  ret i32 0\n}\n");
         s
     }
 

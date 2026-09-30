@@ -43,6 +43,9 @@ impl Frame {
     }
 }
 
+/// The frame name of a `par` statement, which is checked like a closure.
+pub const PAR_FRAME: &str = "a `par` statement";
+
 pub struct Obligation {
     pub ty: Ty,
     pub bound: &'static str,
@@ -64,11 +67,13 @@ pub struct FnCx {
     /// How many errors existed before this function was checked; if it adds
     /// any, "can't tell the type" is left out as a likely consequence.
     pub errors_before: usize,
+    /// For each enclosing `par`, the variables its earlier statements declare.
+    pub par_siblings: Vec<Vec<String>>,
 }
 
 impl FnCx {
     pub fn new(file: FileId, owner: FnId, generics: Vec<GenericDef>) -> FnCx {
-        FnCx { file, owner, generics, frames: Vec::new(), infer: Infer::default(), obligations: Vec::new(), closures: Vec::new(), pure_only: false, fail_ok: false, errors_before: 0 }
+        FnCx { file, owner, generics, frames: Vec::new(), infer: Infer::default(), obligations: Vec::new(), closures: Vec::new(), pure_only: false, fail_ok: false, errors_before: 0, par_siblings: Vec::new() }
     }
 
     pub fn frame(&mut self) -> &mut Frame {
@@ -421,6 +426,15 @@ impl<'a> Checker<'a> {
             candidates.extend(s.consts.keys().cloned());
         }
         candidates.extend(self.global.fns.keys().cloned());
+        if let Some((_, m)) = LATER_TYPES.iter().find(|(n, _)| *n == name) {
+            self.err(cx.file, span, format!("`{name}` isn't supported by this compiler yet (planned for milestone {m})"));
+            return;
+        }
+        if cx.par_siblings.iter().any(|names| names.iter().any(|n| n == name)) {
+            let msg = format!("`{name}` is declared by another statement of this `par`, and the statements run at the same time; use it after the `par`");
+            self.err(cx.file, span, msg);
+            return;
+        }
         let hint = match name {
             "println" | "printf" | "puts" | "console" => "; use `print(x)`".to_string(),
             "len" => "; use the method: `x.len()`".to_string(),
@@ -665,11 +679,59 @@ impl<'a> Checker<'a> {
                 }
             },
             StmtKind::For { inout, pats, iter, body } => self.for_stmt(cx, *inout, pats, iter, body, s.span),
-            StmtKind::Par(_) => {
-                self.err(file, s.span, "`par` isn't supported by this compiler yet (planned for milestone 2)");
-                (None, false)
-            }
+            StmtKind::Par(b) => self.par_stmt(cx, b),
         }
+    }
+
+    /// `par { ... }`: each top-level statement is checked as a closure of its
+    /// own, so it sees copies of the variables from outside and none of the
+    /// other statements' variables. The closure returns the variables the
+    /// statement declares, and they're declared again after the `par`.
+    fn par_stmt(&mut self, cx: &mut FnCx, b: &ast::Block) -> (Option<TStmt>, bool) {
+        let mut branches = Vec::new();
+        let mut declared = Vec::new();
+        cx.par_siblings.push(Vec::new());
+        for s in &b.stmts {
+            let ret = cx.infer.fresh(VarKind::Any);
+            cx.frames.push(Frame::new(PAR_FRAME.into(), ret.clone(), None));
+            let (st, _) = self.stmt(cx, s);
+            let names: Vec<(String, LocalId)> = cx.frame().scopes[0].clone();
+            let vals: Vec<TExpr> = names.iter().map(|(_, id)| TExpr { kind: TK::Local(*id), ty: cx.frame().locals[*id].ty.clone(), span: s.span }).collect();
+            let (value, vty) = match vals.len() {
+                0 => (None, Ty::Unit),
+                1 => (Some(vals[0].clone()), vals[0].ty.clone()),
+                _ => {
+                    let tys: Vec<Ty> = vals.iter().map(|v| v.ty.clone()).collect();
+                    (Some(TExpr { kind: TK::Tuple(vals), ty: Ty::Tuple(tys.clone()), span: s.span }), Ty::Tuple(tys))
+                }
+            };
+            cx.infer.unify(&ret, &vty);
+            let frame = cx.frames.pop().unwrap();
+            let outs: Vec<(String, Ty, bool, Span)> = names.iter().map(|(n, id)| (n.clone(), frame.locals[*id].ty.clone(), frame.mutable[*id], frame.spans[*id])).collect();
+            let eff = frame.used.clone();
+            self.use_effects(cx, &eff, s.span, "par");
+            let id = self.closures.len();
+            self.closures.push(ClosureDef {
+                owner: cx.owner,
+                params: Vec::new(),
+                captures: frame.captures,
+                ret: vty.clone(),
+                eff: eff.clone(),
+                body: Body { locals: frame.locals, params: Vec::new(), pre: Vec::new(), block: TBlock { stmts: st.into_iter().collect(), value: value.map(Box::new) } },
+            });
+            cx.closures.push(id);
+            let ty = Ty::Fn(Box::new(FnTy { params: Vec::new(), ret: vty, eff }));
+            branches.push(TExpr { kind: TK::Closure { id }, ty, span: s.span });
+            cx.par_siblings.last_mut().unwrap().extend(outs.iter().map(|(n, ..)| n.clone()));
+            declared.push(outs);
+        }
+        cx.par_siblings.pop();
+        let mut out = Vec::new();
+        for (closure, outs) in branches.into_iter().zip(declared) {
+            let ids = outs.into_iter().map(|(n, ty, mutable, span)| self.declare(cx, &n, ty, LocalKind::Owned, mutable, span)).collect();
+            out.push(TParBranch { closure, outs: ids });
+        }
+        (Some(TStmt::Par { branches: out }), false)
     }
 
     /// The type inside an optional, reporting an error if `v` isn't one.
@@ -858,6 +920,14 @@ impl<'a> Checker<'a> {
             AssignOp::Mul => Some(BinOp::Mul),
             AssignOp::Div => Some(BinOp::Div),
             AssignOp::Rem => Some(BinOp::Rem),
+            AssignOp::AddW => Some(BinOp::AddW),
+            AssignOp::SubW => Some(BinOp::SubW),
+            AssignOp::MulW => Some(BinOp::MulW),
+            AssignOp::BitAnd => Some(BinOp::BitAnd),
+            AssignOp::BitOr => Some(BinOp::BitOr),
+            AssignOp::BitXor => Some(BinOp::BitXor),
+            AssignOp::Shl => Some(BinOp::Shl),
+            AssignOp::Shr => Some(BinOp::Shr),
         };
         // `m[k] = v` and `m[k] += v` on maps become calls to `set`.
         if let ExprKind::Index { base, args } = &target.kind {
@@ -967,7 +1037,12 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 if f.captures.iter().any(|(_, inner)| inner == id) {
-                    self.err(file, t.span, format!("closures capture copies, so this closure can't change `{name}`; return a value instead"));
+                    let msg = if f.name == PAR_FRAME {
+                        format!("a `par` statement can't change `{name}`, which is declared outside it; declare a new variable in the statement instead")
+                    } else {
+                        format!("closures capture copies, so this closure can't change `{name}`; return a value instead")
+                    };
+                    self.err(file, t.span, msg);
                     return None;
                 }
                 if !f.mutable[*id] {
@@ -1035,7 +1110,18 @@ impl<'a> Checker<'a> {
     fn check_handled(&mut self, cx: &mut FnCx, t: &TExpr) {
         if self.failable(cx, t) {
             let name = self.callee_name(t);
-            self.err(cx.file, t.span, format!("`{name}` can fail; handle it with `?`, `else` or `catch`"));
+            let frame = cx.fr();
+            let hint = if frame.declared.is_none() && frame.name != PAR_FRAME {
+                "; in a closure, `?` passes the failure on to whatever calls the closure, like `task.map(xs, |x| f(x)?)?`"
+            } else {
+                ""
+            };
+            self.err(cx.file, t.span, format!("`{name}` can fail; handle it with `?`, `else` or `catch`{hint}"));
+            // Count the failure anyway, so a `?` after the closure's caller isn't reported too.
+            if cx.fr().declared.is_none() {
+                let f = cx.frame();
+                f.used = f.used.union(&Eff { fail: true, ..Eff::pure() });
+            }
         }
     }
 
@@ -1192,9 +1278,10 @@ impl<'a> Checker<'a> {
                         }
                     }
                     UnOp::Not => {
-                        let t2 = &t;
-                        if !cx.infer.unify(&t2.ty, &Ty::Bool) {
-                            let msg = format!("`!` needs a `bool`, but this is `{}`", self.show(cx, &ty));
+                        // On an integer, `!` flips every bit.
+                        let int = matches!(&ty, Ty::Int(_)) || matches!(&ty, Ty::Var(v) if cx.infer.kind(*v) == Some(VarKind::IntLit));
+                        if !int && !cx.infer.unify(&t.ty, &Ty::Bool) {
+                            let msg = format!("`!` needs a `bool` or an integer, but this is `{}`", self.show(cx, &ty));
                             self.err(file, span, msg);
                         }
                     }
@@ -1257,7 +1344,7 @@ impl<'a> Checker<'a> {
             ExprKind::If { cond, then, els } => self.if_expr(cx, cond, then, els.as_deref(), span, want, value),
             ExprKind::Match { scrutinee, arms, .. } => self.match_expr(cx, scrutinee, arms, span, want, value),
             ExprKind::Lock { .. } => {
-                self.err(file, span, "`lock` isn't supported by this compiler yet (planned for milestone 2)");
+                self.err(file, span, "`lock` isn't supported by this compiler yet (planned for milestone 3)");
                 self.error_expr(span)
             }
             ExprKind::Unsafe(_) => {
@@ -1270,6 +1357,10 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Closure { params, body } => self.closure(cx, params, body, span, want),
             ExprKind::Return(v) => {
+                if cx.fr().name == PAR_FRAME {
+                    self.err(file, span, "`return` can't be used in a `par` statement, since the statements run at the same time; return after the `par`");
+                    return self.error_expr(span);
+                }
                 let ret = cx.fr().ret.clone();
                 let tv = v.as_ref().map(|v| {
                     let t = self.expr(cx, v, Some(&ret));

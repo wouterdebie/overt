@@ -235,7 +235,6 @@ fn outline_cmd(args: &[String]) -> i32 {
     let std_file = stdlib::outline_file(target);
     if std_file.is_none() && stdlib::MODULE_NAMES.contains(&target.as_str()) {
         let m = match target.as_str() {
-            "task" => "2",
             "time" | "net" => "3",
             "http" | "json" => "4",
             _ => "5",

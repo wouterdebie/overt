@@ -99,6 +99,14 @@ fn assign_op(p: P) -> Option<AssignOp> {
         P::StarEq => AssignOp::Mul,
         P::SlashEq => AssignOp::Div,
         P::PercentEq => AssignOp::Rem,
+        P::PlusWEq => AssignOp::AddW,
+        P::MinusWEq => AssignOp::SubW,
+        P::StarWEq => AssignOp::MulW,
+        P::AmpEq => AssignOp::BitAnd,
+        P::PipeEq => AssignOp::BitOr,
+        P::CaretEq => AssignOp::BitXor,
+        P::ShlEq => AssignOp::Shl,
+        P::ShrEq => AssignOp::Shr,
         _ => return None,
     })
 }

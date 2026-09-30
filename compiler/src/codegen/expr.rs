@@ -144,6 +144,9 @@ impl<'p> Gen<'p> {
                 }
                 let Ty::Array(et) = &ty else { unreachable!() };
                 let et = (**et).clone();
+                if let Some(v) = self.static_array(&et, items) {
+                    return (v, false);
+                }
                 let slot = self.alloca("%ovt.arr");
                 self.inst(&format!("store %ovt.arr zeroinitializer, ptr {slot}"));
                 let size = self.size_const(&et);
@@ -206,6 +209,7 @@ impl<'p> Gen<'p> {
                 let v = self.borrow(x);
                 let t = self.tmp();
                 match (op, &ty) {
+                    (UnOp::Not, Ty::Int(_)) => self.inst(&format!("{t} = xor {}, -1", v.op())),
                     (UnOp::Not, _) => self.inst(&format!("{t} = xor i1 {}, true", v.repr)),
                     (UnOp::Neg, Ty::Float(_)) => self.inst(&format!("{t} = fneg {}", v.op())),
                     (UnOp::Neg, _) => {
@@ -812,9 +816,12 @@ impl<'p> Gen<'p> {
         let drop = self.closure_drop(id, &targs, &eargs);
         let dp = self.gep(&env, &p, &[0, 1]);
         self.inst(&format!("store ptr {drop}, ptr {dp}"));
+        let mark = self.closure_mark(id, &targs, &eargs);
+        let mp = self.gep(&env, &p, &[0, 2]);
+        self.inst(&format!("store ptr {mark}, ptr {mp}"));
         for (k, (outer, _)) in caps.iter().enumerate() {
             let v = self.owned(&TExpr { kind: TK::Local(*outer), ty: self.f.local_tys[*outer].clone(), span: Span::default() });
-            let fp = self.gep(&env, &p, &[0, k + 2]);
+            let fp = self.gep(&env, &p, &[0, k + 3]);
             self.inst(&format!("store {}, ptr {fp}", v.op()));
         }
         let agg = V::new("%ovt.fn", "undef");

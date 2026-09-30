@@ -8,13 +8,14 @@ An experiment: a compiled programming language designed for coding agents to wri
 
 ## Status
 
-**Milestone 1: the compiler is done; the benchmark hasn't run yet.**
-- **Language:** the sequential language in SPEC.md compiles to native code, with value semantics (reference counting and copy-on-write, checked leak-free and clean under AddressSanitizer).
+**Milestone 2 is done: the compiler, the runtime and the `hashdir` benchmark.** The benchmark results for milestones 1 and 2 (`wordfreq`, `jsonfmt` and `hashdir` against Rust and Go) are in [DESIGN.md](DESIGN.md#benchmark-findings).
+- **Language:** SPEC.md compiles to native code, with value semantics (reference counting and copy-on-write, checked leak-free and clean under AddressSanitizer).
   - Structs, enums (including recursive ones), generics, closures and methods.
   - `match` with exhaustiveness checking, optionals, failure handling, effects and parameter modes.
-- **Standard library:** strings, arrays, `Map`, `Set`, `os`, `fs`, `math` and `log`, written mostly in Overt.
+- **Concurrency:** `main` and all code run in tasks on one worker thread per core. `task.map`, `par` and `Atomic` share values safely by marking them shared, and ThreadSanitizer checks it.
+- **Standard library:** strings, arrays, `Map`, `Set`, `Atomic`, `os`, `fs` (including `walk`), `task`, `math` and `log`, written mostly in Overt.
 - **Tools:** `ovt test` runs `ex` lines and `test` blocks, and `ovt outline` documents any module, including the standard library.
-- **Not yet:** concurrency (milestone 2), networking (3 and 4) and C interop (5).
+- **Not yet:** networking, timers, cancellation, `Shared` and `Chan` (milestones 3 and 4), and C interop (5).
 
 ## Building
 

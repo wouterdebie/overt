@@ -1,0 +1,12 @@
+Dir .hidden
+File .hidden/h
+File a.b
+File a.txt
+Link link
+Dir sub
+File sub/b.txt
+Dir sub/deeper
+File sub/deeper/c.txt
+[".hidden", "a.b", "a.txt", "link", "sub"]
+["h", "dot", "a", "b", "c"]
+NotFound

@@ -1,0 +1,56 @@
+// `task.map`, `par` and `Atomic`: results keep their order, the lowest
+// failing index wins, and variables declared in `par` are usable after it.
+fn check(x: int) -> int ! fail {
+  if x % 5 == 2 {
+    fail(.Invalid, "bad ${x}")
+  }
+  return x * 10
+}
+
+fn fetch(name: str) -> str ! fail {
+  if name.is_empty() {
+    fail(.NotFound, "no name")
+  }
+  return "got ${name}"
+}
+
+fn pair(a: str, b: str) -> str ! fail {
+  par {
+    let x = fetch(a)?
+    let y = fetch(b)?
+  }
+  return "${x}, ${y}"
+}
+
+fn main() ! io, fail {
+  var xs: [int] = []
+  for i in 0..1000 {
+    xs.push(i)
+  }
+  let tens = task.map(xs, |x| x * 10)
+  print("${tens.len()} ${tens[0]} ${tens[999]} ${tens.sum()}")
+  let prefix = "n"
+  print(task.map(["a", "b", "c"], |s| prefix + s))
+  print(task.map([1, 3, 4], check)?)
+  print(task.map([1, 3, 12, 4, 7], check) catch e { [e.msg.len()] })
+  let r = task.map([0, 1, 2, 3, 4, 5, 6, 7], check) catch e {
+    print(e.msg)
+    []
+  }
+  print(r)
+  print(task.map([[1, 2], [3]], |row| task.map(row, |x| x + 1)))
+  print(pair("a", b: "b")?)
+  print(pair("a", b: "") catch e { e.msg })
+  par {
+    let (lo, hi) = (xs[0], xs[999])
+    var names = ["p", "q"]
+    print("side effect")
+  }
+  names.push("r")
+  print("${lo} ${hi} ${names}")
+  let count: Atomic[int] = Atomic.new(0)
+  let adds = task.map(xs, |x| count.add(1))
+  print("${adds.len()} ${count.load()}")
+  count.store(-1)
+  print(count.load())
+}

@@ -1,0 +1,20 @@
+fn f() -> int {
+  var n = 1
+  par {
+    n = 2
+    let m = 3
+  }
+  par {
+    let a = 1
+    let b = a + 1
+  }
+  par {
+    return 5
+  }
+  return n + m + b
+}
+
+fn main() ! io {
+  let c: Atomic[str] = Atomic.new(1)
+  print(f())
+}

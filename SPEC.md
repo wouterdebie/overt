@@ -75,7 +75,7 @@ test "hits count per key" ! fail {
 - In strings only `${` is special (`\$` escapes it), so JSON needs no brace escaping: `"""{"id": ${id}}"""`.
 - There are no implicit conversions, except that a `T` is accepted where a `?T` is expected. Both sides of an operator have the same type. Convert with `int(x)`, `u8(x)`, `f64(x)` (these trap if the value doesn't fit); parse with `int.parse(s)`.
 - Integer `+ - *` trap on overflow; `+% -% *%` wrap. `/` and `%` trap on zero. Indexing out of range traps. A trap stops the program with a message and its source location.
-- Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `& | ^ << >>`. `+` also joins strings. There is no operator or function overloading.
+- Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `& | ^ << >>`. `!` on an integer flips its bits. `+` also joins strings. There is no operator or function overloading.
 
 ## Declarations
 
@@ -118,7 +118,7 @@ fn parse(line: str) -> Entry ! fail
 - Return values with `return`. `if`, `match`, `else`, `catch` and `lock` blocks used as values yield their last line.
 - `pre cond` traps on entry if false. `ex` lines are examples that `ovt test` runs: `ex <bool expr>`, `ex <call> fails`, `ex <call> fails .Kind`. They can't use `io`. A failure fails the example; inner calls that can fail need `?`.
 - Parameters may have defaults: `fn get(url: str, retries: int = 3)`.
-- Named arguments: inside the parentheses, when two or more arguments go to parameters of the same type, name all but the first of them: `copy(a, dst: b)`, `s.replace("a", new: "b")`. Any argument may be named. Named arguments come after positional ones, in any order.
+- Named arguments: inside the parentheses, when two or more arguments go to parameters of the same type, name all but the first of them; literals needn't be named: `copy(a, dst: b)`, `rotr(x, 7)`. Any argument may be named. Named arguments come after positional ones, in any order.
 - A call's result must be used: `s.trim()` alone on a line is an error. Discard with `_ = f()`.
 - Closures: `|x| x * 2`, or a block body `|x| { ... }` that uses `return`. They capture copies of the variables they use and can't assign to outer variables.
 - Methods are functions named `Type.name`, declared in the type's module. With `self` first they're called as `v.name(...)`; without it they're static (`Stack.new()`).

@@ -104,6 +104,14 @@ impl<'p> Gen<'p> {
         V::new(ty, t)
     }
 
+    /// Loads the count at the start of a buffer, box or environment. It's an
+    /// atomic load, since other tasks may be changing a shared count.
+    pub fn load_rc(&mut self, ptr: &str) -> V {
+        let t = self.tmp();
+        self.inst(&format!("{t} = load atomic i64, ptr {ptr} monotonic, align 8"));
+        V::new("i64", t)
+    }
+
     pub fn extract(&mut self, v: &V, i: usize, ty: &str) -> V {
         let t = self.tmp();
         self.inst(&format!("{t} = extractvalue {} {}, {i}", v.ty, v.repr));
@@ -342,11 +350,12 @@ impl<'p> Gen<'p> {
         format!("define internal {rt} {sym}({}) {{\nentry:\n{}{}}}\n", params.join(", "), f.allocas, f.code)
     }
 
-    /// The environment struct of a closure: count, drop function, then the captures.
+    /// The environment struct of a closure: count, drop function, mark
+    /// function (see `Helper::Mark`), then the captures.
     pub fn env_lty(&mut self, id: ClosureId) -> String {
         let c = &self.p.closures[id];
         let tys: Vec<Ty> = c.captures.iter().map(|(_, inner)| self.sub(&c.body.locals[*inner].ty)).collect();
-        let mut parts = vec!["i64".to_string(), "ptr".to_string()];
+        let mut parts = vec!["i64".to_string(), "ptr".to_string(), "ptr".to_string()];
         for t in &tys {
             parts.push(self.lty(t));
         }
@@ -373,7 +382,7 @@ impl<'p> Gen<'p> {
         for (k, (_, inner)) in caps.iter().enumerate() {
             let ty = self.f.local_tys[*inner].clone();
             let lt = self.lty(&ty);
-            let p = self.gep(&env, "%env", &[0, k + 2]);
+            let p = self.gep(&env, "%env", &[0, k + 3]);
             let v = self.load(&lt, &p);
             let slot = self.f.slots[*inner].clone();
             self.inst(&format!("store {}, ptr {slot}", v.op()));
@@ -406,10 +415,28 @@ impl<'p> Gen<'p> {
         let c = &self.p.closures[id];
         let tys: Vec<Ty> = c.captures.iter().map(|(_, inner)| self.sub(&c.body.locals[*inner].ty)).collect();
         for (k, ty) in tys.iter().enumerate() {
-            let p = self.gep(&env, "%env", &[0, k + 2]);
+            let p = self.gep(&env, "%env", &[0, k + 3]);
             self.drop_ptr(&p, ty);
         }
         self.inst("call void @ovt_free(ptr %env)");
+        self.term("ret void");
+        let f = std::mem::take(&mut self.f);
+        format!("define internal void {sym}(ptr %env) {{\nentry:\n{}{}}}\n", f.allocas, f.code)
+    }
+
+    /// Marks what a closure captured as shared, once its environment is.
+    pub fn emit_closure_mark(&mut self, id: ClosureId, targs: &[Ty], eargs: &[Eff], sym: &str) -> String {
+        self.f = Fx { targs: targs.to_vec(), eargs: eargs.to_vec(), cur: "entry".into(), ..Default::default() };
+        let env = self.env_lty(id);
+        let c = &self.p.closures[id];
+        let tys: Vec<Ty> = c.captures.iter().map(|(_, inner)| self.sub(&c.body.locals[*inner].ty)).collect();
+        for (k, ty) in tys.iter().enumerate() {
+            if self.needs_rc(ty) {
+                let p = self.gep(&env, "%env", &[0, k + 3]);
+                let h = self.helper(Helper::Mark, ty);
+                self.inst(&format!("call void {h}(ptr {p})"));
+            }
+        }
         self.term("ret void");
         let f = std::mem::take(&mut self.f);
         format!("define internal void {sym}(ptr %env) {{\nentry:\n{}{}}}\n", f.allocas, f.code)
@@ -594,6 +621,7 @@ impl<'p> Gen<'p> {
             TStmt::ForRange { local, lo, hi, inclusive, body } => self.for_range(*local, lo, hi, *inclusive, body),
             TStmt::ForArray { elem, index, array, place, body } => self.for_array(*elem, *index, array, place.as_ref(), body),
             TStmt::ForMap { key, value, map, is_set, body } => self.for_map(*key, *value, map, *is_set, body),
+            TStmt::Par { branches } => self.par_stmt(branches),
         }
     }
 
@@ -659,7 +687,7 @@ impl<'p> Gen<'p> {
         let check = self.label("check");
         self.term(&format!("br i1 {nn}, label %{check}, label %{slow}"));
         self.start(&check);
-        let rc = self.load("i64", &buf.repr);
+        let rc = self.load_rc(&buf.repr);
         let usedp = self.tmp();
         self.inst(&format!("{usedp} = getelementptr inbounds i8, ptr {}, i64 16", buf.repr));
         let used = self.load("i64", &usedp);

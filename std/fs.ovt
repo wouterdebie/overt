@@ -12,3 +12,22 @@ fn write(path: str, data: str) ! io, fail
 
 // Whether a file or directory exists at `path`.
 fn exists(path: str) -> bool ! io
+
+// A directory entry: its path, and what it is.
+type Entry { path: str, kind: Kind }
+
+// What a directory entry is. Symbolic links aren't followed.
+enum Kind {
+  File
+  Dir
+  Link
+  Other
+}
+
+// Every entry under `dir`, at any depth, sorted by path (comparing bytes).
+// Paths are relative to `dir`, like `a/b.txt`. Symbolic links are listed as
+// `.Link` and not followed. Fails if `dir` or a directory in it can't be read.
+fn walk(dir: str) -> [Entry] ! io, fail
+
+// The entries directly in `dir`, sorted by name.
+fn list(dir: str) -> [Entry] ! io, fail

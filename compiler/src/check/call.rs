@@ -382,6 +382,11 @@ impl<'a> Checker<'a> {
             if let Some(TypeRef::Adt(id)) = scope.types.get(&name.name).cloned() {
                 return self.construct(cx, id, None, args, span, want);
             }
+            if let Some((_, _, ms)) = LATER_FNS.iter().find(|(mm, f, _)| *mm == m && *f == name.name) {
+                // The arguments aren't checked: they'd only add follow-on errors.
+                self.err(file, name.span, format!("`{m}.{}` isn't supported by this compiler yet (planned for milestone {ms})", name.name));
+                return self.error_expr(span);
+            }
             let names: Vec<String> = scope.fns.keys().filter(|n| !n.starts_with('_')).cloned().collect();
             let hint = closest(&name.name, names.iter().map(|s| s.as_str()))
                 .map(|s| {
@@ -686,7 +691,10 @@ impl<'a> Checker<'a> {
             if !earlier_same {
                 continue;
             }
-            let named = a.name.is_some() || matches!(&a.value.kind, ExprKind::Ident(n) if *n == params[i].name);
+            // A literal can't be a swapped variable, so it counts as named too.
+            let literal = matches!(&a.value.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::None)
+                || matches!(&a.value.kind, ExprKind::Unary(ast::UnOp::Neg, inner) if matches!(inner.kind, ExprKind::Int(_) | ExprKind::Float(_)));
+            let named = literal || a.name.is_some() || matches!(&a.value.kind, ExprKind::Ident(n) if *n == params[i].name);
             if !named {
                 let tname = self.show(cx, &params[i].ty);
                 self.err(

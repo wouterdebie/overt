@@ -11,7 +11,7 @@ The goals are a ladder of programs. Each one needs a new layer of the compiler o
 | 4 | HTTP JSON API | `http`, automatic JSON, error kinds as status codes |
 | 5 | The same API on sqlite | C interop and blocking calls |
 | 6 | Redis-compatible server | All of the above in one real server |
-|                        7 | `ovt` written in Overt | A large codebase maintained by agents |
+| 7 | `ovt` written in Overt | A large codebase maintained by agents |
 
 ## How each milestone runs
 
@@ -207,3 +207,9 @@ For every program, depending on the task:
 - binary size
 
 The scripts in `bench/` that run agents and record these numbers are built alongside milestone 1. Headless Claude Code runs report token usage, which covers the agent numbers.
+
+## Later experiments
+
+Frontier models know Rust and Go from training and learn Overt from its docs, so the comparison so far isn't apples to apples. Two ways to even it out, for later:
+- **A smaller open-weight model.** Its Rust and Go are weaker, so a small spec and a strict checker may help it more than they help a frontier model.
+- **A model that doesn't know the comparison languages**, for example one with Rust and Go unlearned or held out of training. Every language would then be learned from its docs alone.

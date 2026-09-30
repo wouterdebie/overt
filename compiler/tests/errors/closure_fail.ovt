@@ -1,0 +1,9 @@
+fn load(path: str) -> str ! io, fail {
+  return fs.read(path)?
+}
+
+fn main() ! io, fail {
+  let texts = task.map(["a", "b"], |p| load(p))?
+  var w: [u32; 4] = [0, 0, 0, 0]
+  print(texts)
+}

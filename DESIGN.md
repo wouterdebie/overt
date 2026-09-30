@@ -27,7 +27,8 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 | No imports | Removes the "forgot the import" round | `use` lists. Cost: a local can't be named like a module |
 | No shadowing | Catches `let n = 5` in an inner block where `n = 5` was meant | Rust-style shadowing |
 | Unused result is an error | With value semantics, `s.trim()` as a statement does nothing, silently | Warnings |
-| Named arguments when parameter types repeat | Swapped `(src, dst)` is a classic agent bug | Always named (too many tokens); never named |
+| Named arguments when parameter types repeat, except literals | Swapped `(src, dst)` is a classic agent bug. A literal can't be a swapped variable, and `rotr(x, 7)` cost a failed build in five of six Overt `hashdir` runs before literals were exempt | Always named (too many tokens); never named; naming literals too |
+| Every arithmetic and bit operator has an assignment form (`+%=`, `^=`, `<<=`, ...) | C-family agents expect it; `h[0] +%= a` cost a `hashdir` run a round | Only `+= -= *= /= %=` |
 | One fixed `ErrKind` set | Servers map errors to statuses; `http.serve` does it automatically | Per-function error types (conversion boilerplate); string codes (typos) |
 | Effects: only `io` and `fail` | Enough to know "does this touch the world" and "can this fail" | Fine-grained effects (signature churn) |
 | `dbg` ignores effects | Print debugging in pure code without editing signatures | |
@@ -40,6 +41,9 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 | `pat => x += 1` accepted in `match` arms | A Rust habit that costs nothing to allow; `ovt fmt` adds the braces | An error |
 | Arguments that read a variable passed `inout` are copied | `xs.push(xs[0])` just works, and the spec needs one rule less | Rejecting any other use of the variable in the call |
 | Name "Overt" | States the principle; no existing language with a similar name whose habits would leak in | Cairn (one letter from Cairo, a real language) |
+| `!` on an integer flips its bits | Hashing needs bitwise NOT (SHA-256's choose function), and agents coming from Rust write `!x` | `~x` (one more operator); no NOT at all (`x ^ 0xffffffff`) |
+| `Atomic` operations are `! io` | Another task can change the value, so a function that reads one isn't pure | Pure atomics |
+| `fs.walk` and `fs.list` return entries sorted by path | Deterministic output, and a listing like `hashdir`'s needs no sort | Directory order |
 
 ## Memory model
 
@@ -48,14 +52,15 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 | Kind | Layout |
 |---|---|
 | plain | inline, C layout (fields in declared order, C alignment) |
-| `str`, `[T]` | `{buf: ptr, off: i64, len: i64}`, a view of a buffer with a 24-byte header `{rc: i64, cap: i64, used: i64}` followed by the elements. `used` is how many elements the buffer holds, since a view may show fewer. As in Lean 4, `rc > 0` is a count owned by one task, `rc < 0` (planned) a shared count updated atomically, and `rc == 0` a static buffer that is never freed (string literals). The empty array is `{null, 0, 0}` |
+| `str`, `[T]` | `{buf: ptr, off: i64, len: i64}`, a view of a buffer with a 24-byte header `{rc: i64, cap: i64, used: i64}` followed by the elements. `used` is how many elements the buffer holds, since a view may show fewer. As in Lean 4, `rc > 0` is a count owned by one task, `rc < 0` a shared count updated atomically (see below), and `rc == 0` a static buffer that is never freed (string literals, and array literals of numbers). The empty array is `{null, 0, 0}` |
 | `Map`, `Set` | plain Overt structs in `std/collections.ovt`: parallel arrays of keys, values and live flags, plus an open-addressing slot table of indexes, like Python's compact dict. They get copy-on-write from their arrays |
 | recursive field | a pointer to a box `{rc: i64, value}`, inserted by the compiler when a type contains itself without an array or other indirection in between |
 | enum | `i32` when no variant has fields; otherwise `{i32 tag, [N x i64] payload}`, with each variant's fields laid out as a struct in the payload |
 | `?T` | `{i1 some, T}`; niche optimization comes later |
-| closure | `{fn: ptr, env: ptr}`. The environment is `{rc: i64, drop: ptr, captures...}` holding copies of the captured values; `drop` frees it, so dropping a function value doesn't need its closure's type. Named functions used as values get a thunk and a null environment |
+| closure | `{fn: ptr, env: ptr}`. The environment is `{rc: i64, drop: ptr, mark: ptr, captures...}` holding copies of the captured values; `drop` frees it and `mark` marks the captures shared, so neither needs the closure's type. Named functions used as values get a thunk and a null environment |
 | resource | planned (milestone 5): plain layout plus a drop function; move-only |
-| `Shared[T]`, `Atomic`, `Chan` | planned (milestone 2): a pointer to a box with an always-atomic count. `Shared` holds `{rc, lock, owner_task, T}` |
+| `Atomic` | a std struct holding one closure-like value whose environment is `{rc, drop, mark, value}`, so copies share the value and it gets counting and marking for free |
+| `Shared[T]`, `Chan` | planned (milestone 3): a pointer to a box with an always-atomic count. `Shared` holds `{rc, lock, owner_task, T}` |
 
 ### Copy, move, drop
 
@@ -63,6 +68,7 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 - **Cleanup stack.** Locals and temporaries that need dropping are registered on a stack of scopes. Leaving a scope normally drops its entries; `return`, failure, `break` and `continue` drop every scope they leave.
 - **Mutating a heap-backed value** requires its view to be the only one and to cover the whole buffer (`rc == 1`, `off == 0`, `len == used`); otherwise the viewed range is copied first, with its elements `dup`ed. `push` and `s += t` then work in place, growing the buffer by doubling.
 - **Slices** (`xs[a..b]`, `s[a..b]`) are `{buf, off + a, b - a}` plus a `dup`. Known cost: a small slice keeps a large buffer alive.
+- **Literals.** An array literal whose elements are all number literals is static data (count 0), like a string literal, so a constant table like SHA-256's costs nothing to use; changing a copy copies it first. Before this, every use of `const K: [u32] = [...]` built the array again, and SHA-256 ran at 4 MB/s.
 - **Per-type helpers.** For each concrete type, codegen generates `dup`, `drop`, `eq`, `cmp`, `hash` and `show` functions that call the helpers of the type's components, so recursive types need no special handling.
 - **Not yet:** a variable's last use doesn't become a move, so values are copied (a count update) where a move would do. Perceus-style reuse analysis comes later.
 - **Resource drops** (milestone 5) run at scope end in reverse declaration order. Moved-out variables aren't dropped (static drop flags).
@@ -101,12 +107,11 @@ Disjoint fields (`f(inout p.x, inout p.y)`) are rejected for now, since any two 
 
 A task owns its data. Non-atomic counting is safe even when the scheduler moves a task to another worker thread, because the handoff itself synchronizes.
 
-Data that becomes reachable from more than one task is marked *shared* by negating its count, Lean 4 style. Count operations on marked buffers use atomics. Marking happens when a value:
-- is put into a `Shared`, `Chan` or `Atomic`
-- is captured by a `par` statement, `task.map` or `task.group` closure
-- is passed to `g.spawn`
-
-Marking walks the reachable buffers once and stops at any buffer that's already marked.
+Data that becomes reachable from more than one task is marked *shared* by negating its count, Lean 4 style:
+- **When.** Before `task.map` starts, its array and its closure are marked. Before `par` starts, each statement's closure is, and its environment holds copies of what the statement uses from outside. Later: values put into a `Shared` or `Chan`, and closures given to `task.group` or `g.spawn`.
+- **How.** A generated `mark` helper per type walks the reachable buffers, boxes and environments once. It negates positive counts, and stops at any count that's already shared or static.
+- **Counting.** Generated code loads a count with an atomic (relaxed) load, which is a plain load on arm64. A positive count changes inline with plain stores; any other count goes to the runtime, which changes shared counts atomically. Copy-on-write treats a shared buffer as not unique, except at count -1, the last reference, which makes it owned again.
+- **Checked.** With marking turned off, ThreadSanitizer reports races on the counts of strings that tasks copy, and the program crashes. With it on, `hashdir` and the concurrency tests are clean.
 
 ## Effects and failure
 
@@ -122,28 +127,45 @@ Marking walks the reachable buffers once and stops at any buffer that's already 
 
 - **v0:** flush stdout, write `file:line:col: trap: message` (later a backtrace) to stderr, and exit with status 101. Not `abort()`: on macOS that triggers a slow crash report for every trap.
 - **Overflow** uses `llvm.*.with.overflow` intrinsics. **Bounds checks** are a compare and a branch to a cold trap block.
-- **Stack overflow** hits the task stack's guard page. A SIGSEGV handler on an alternate signal stack turns it into a trap message.
+- **Stack overflow** hits the task stack's guard page. A SIGSEGV handler on each worker's alternate signal stack turns it into `trap: stack overflow (recursion too deep?)`. It isn't installed under the sanitizers, which have their own.
 - **Later:** a trap fails only its task, using LLVM landing pads for unwinding, so one bad request only kills its connection. This needs a policy for locks poisoned mid-update.
 
 ## Concurrency runtime
 
-The runtime is written in C as a static library, `libovtrt.a`, linked into every program.
+The runtime is C, in `runtime/rt.c`, compiled with every program. Milestone 2 built tasks, workers, `par`, `task.map`, `Atomic` and the blocking pool. Networking, timers, cancellation, `Shared` and `Chan` come in milestone 3.
 
-- **Scheduler.** Tasks are spread over one worker thread per core. Each worker has its own run queue (a Chase-Lev deque) and idle workers steal from busy ones. A global queue takes tasks from outside the workers.
-- **IO.** kqueue on macOS first; later epoll and then io_uring on Linux. Sockets are non-blocking. A task waiting on IO registers interest and parks.
+- **Tasks.** `main` is the first task, and every Overt function runs in one. Tasks are stackful coroutines, so a borrowed pointer stays valid across a wait, which avoids the whole class of Rust `Pin` and self-referential future problems.
+- **Workers.** One OS thread per core; `OVT_WORKERS` overrides the count.
+  - Worker 0 is the process's main thread.
+  - The others start the first time a task is spawned, so a sequential program stays single-threaded, and `ovt test` can still fork a child per test.
+- **Run queues.**
+  - Each worker has a FIFO run queue behind a mutex. A global queue takes tasks woken from threads that aren't workers.
+  - An idle worker takes from its own queue, then the global one, then steals from the others. When all are empty it sleeps on a condition variable.
+  - v0 uses mutexes rather than Chase-Lev deques, since tasks are coarse and ThreadSanitizer checks mutexes exactly. Revisit this if profiles show contention.
 - **Task stacks.**
-  - Each task reserves 256 KiB of virtual memory plus a guard page. The OS commits pages only when they're touched, and stacks are pooled and `madvise(MADV_FREE)`d on reuse.
+  - A task's stack is 256 KiB of virtual memory, whose lowest page (16 KiB on arm64 macOS) is a guard page. `main` gets 8 MiB, like a main thread. The OS commits pages only when they're touched.
+  - Finished tasks' stacks are pooled (up to 64) and `madvise(MADV_FREE)`d.
   - Stacks never move, because borrowed parameters point into them, so there are no growable stacks.
-  - An idle task costs its touched pages, roughly 16–32 KiB with arm64 macOS's 16 KiB pages.
-  - This is why tasks keep their own stacks (stackful coroutines): a borrowed pointer stays valid across an IO wait, which avoids the whole class of Rust `Pin` and self-referential future problems.
-- **Context switch.** Hand-written assembly per architecture, arm64 first. It saves x19–x30, sp and d8–d15, about 20 instructions.
-- **Blocking C calls.** `blocking` extern calls run on a separate pool of OS threads while the task parks. Non-blocking extern calls run on the task stack, so heavy C work should be marked `blocking`.
-- **Timers.** A timer heap per worker, used by `time.sleep` and `task.timeout`.
-- **Cancellation.** Each task has a flag, and cancellation propagates down the task tree. The flag is checked at every suspension point and on entry to every `io` call, which then fails with `.Cancelled`.
-- **Structured scopes.** `par`, `task.map` and `task.group` create child scopes, and the parent waits for them. In fail-fast scopes (`par`, `task.map`), a failure cancels the siblings.
-- **`Shared[T]`.** Lock blocks can't do `io`, so critical sections are short. v0 uses `os_unfair_lock` (a pthread mutex on Linux), which blocks the worker thread for the duration. A task relocking a `Shared` it already holds traps.
-- **`Chan[T]`.** A bounded ring buffer with queues of parked senders and receivers.
-- **`Atomic[int]`.** A box holding an atomic `i64`.
+  - An idle task costs its touched pages, roughly 16–32 KiB with 16 KiB pages.
+- **Context switch.** Hand-written arm64 assembly that saves x19–x30, sp and d8–d15. Other architectures don't build yet.
+- **Waiting.** A task waits on a *waiter* in its own stack frame, and wakes exactly once:
+  - The task switches to its worker's scheduler, which marks the waiter parked with a compare-and-swap.
+  - The waker's last access is an exchange that marks the waiter done. If the waiter was parked, the waker puts the task back on a run queue.
+  - The frame stays valid until the task has seen "done", so a waker never touches freed memory. A first design kept a park flag on the task instead, and a helper could reach a finished task or a parent's returned frame.
+- **Structured scopes.** `ovt_parallel(n, body, ctx)` runs `body(ctx, i)` for every index, and `task.map` and `par` compile to it.
+  - The work runs on up to one task per worker, including the calling task. Indexes are handed out one at a time.
+  - After a failure, no new index starts, and the error of the lowest failing index is passed on. Indexes are handed out in order and a started body finishes, so that choice is deterministic.
+  - The other results are dropped. Bodies already running finish, since there's no cancellation yet.
+- **Blocking pool.** File IO runs on up to 64 extra threads while the task waits, so a worker never sits in the kernel. With only one task alive there's nothing else to run, so the call runs inline instead.
+- **`Atomic[int]`.** `load`, `store` and `add` are sequentially consistent atomic operations on the number.
+- **Sanitizers.** Context switches are annotated for ThreadSanitizer (fibers) and AddressSanitizer (stack switching), and a stack is unpoisoned before reuse. `OVT_CFLAGS="-fsanitize=thread -g"` builds a program with ThreadSanitizer.
+- **Planned for milestone 3:**
+  - **IO.** kqueue on macOS first; later epoll and then io_uring on Linux. Sockets are non-blocking. A task waiting on IO registers interest and parks.
+  - **Timers.** A timer heap per worker, used by `time.sleep` and `task.timeout`.
+  - **Cancellation.** Each task has a flag, and cancellation propagates down the task tree. The flag is checked at every suspension point and on entry to every `io` call, which then fails with `.Cancelled`. Fail-fast scopes then cancel the bodies that are still running.
+  - **`Shared[T]`.** Lock blocks can't do `io`, so critical sections are short. v0 uses `os_unfair_lock` (a pthread mutex on Linux), which blocks the worker thread for the duration. A task relocking a `Shared` it already holds traps.
+  - **`Chan[T]`.** A bounded ring buffer with queues of parked senders and receivers.
+- **Blocking C calls (milestone 5).** `blocking` extern calls run on the blocking pool while the task parks. Non-blocking extern calls run on the task stack, so heavy C work should be marked `blocking`.
 
 ## C interop
 
@@ -177,7 +199,7 @@ The compiler (`compiler/`) is written in Rust with no dependencies. Its stages:
    - `pat.rs`: patterns, and exhaustiveness with the usefulness algorithm, which also gives an example of a missing case.
    - `zonk.rs`: resolves inferred types, defaults literals, checks `Eq`/`Ord`/`Hash` constraints.
    - The result is the typed program (`tir.rs`), whose types may still contain generic parameters.
-4. **`codegen`**: textual LLVM IR. Each function is emitted once per set of type arguments, from a work queue, along with per-type helpers (`helpers.rs`), `match` (`pat.rs`) and intrinsics (`intrin.rs`).
+4. **`codegen`**: textual LLVM IR. Each function is emitted once per set of type arguments, from a work queue, along with per-type helpers (`helpers.rs`), `match` (`pat.rs`), intrinsics including `task.map` (`intrin.rs`) and `par` (`par.rs`).
 5. **clang**: compiles the IR together with the runtime (`runtime/rt.c`, embedded in `ovt`).
 
 Diagnostics are one line each, with the fix in the message when one is known. Planned: `--json` output, and `ovt put` and `ovt q` on the same front end.
@@ -190,11 +212,11 @@ The compiler's tests (`cargo test`) are golden files:
 - the standard library's `ex` lines (`ovt test --std`)
 - reference versions of the task programs (`tests/programs/`), which must pass the tasks' tests
 
-Set `OVT_CFLAGS="-fsanitize=address -g"` to build any program with AddressSanitizer.
+Set `OVT_CFLAGS="-fsanitize=address -g"` to build any program with AddressSanitizer, or `-fsanitize=thread` for ThreadSanitizer.
 
 ## Standard library
 
-The standard library (`std/`) is written in Overt, and embedded in `ovt`. Functions declared without a body are intrinsics, implemented in `codegen/intrin.rs` over the runtime. Files like `str.ovt` and `collections.ovt` declare methods and types visible everywhere; `os.ovt`, `fs.ovt`, `math.ovt` and `log.ovt` are modules. `ovt outline <name>` shows a file's declarations and docs, and hides private (`_`) names. The same outlines are what agents read, so the docs in std/ are part of the language's interface.
+The standard library (`std/`) is written in Overt, and embedded in `ovt`. Functions declared without a body are intrinsics, implemented in `codegen/intrin.rs` over the runtime. Files like `str.ovt`, `collections.ovt` and `atomic.ovt` declare methods and types visible everywhere; `os.ovt`, `fs.ovt`, `math.ovt`, `log.ovt` and `task.ovt` are modules. `ovt outline <name>` shows a file's declarations and docs, and hides private (`_`) names. The same outlines are what agents read, so the docs in std/ are part of the language's interface.
 
 ## Build order
 
@@ -307,8 +329,36 @@ The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone l
 - **Stumble:** a helper `fn Parser.bad(self, what: str) -> never ! fail` that always fails, called without `?` (one run, two failed builds). The rule is consistent, since every call that can fail is handled, but the agent then replaced every call with an inline `fail(...)`, and its regex broke the parentheses.
 - **Speed:** Overt is 3.5 times slower than Rust here, and about twice as slow as Go. The reference Overt version takes 0.37 s.
 
+### `hashdir` in Overt, Rust and Go, three runs each (protocol v4, milestone 2)
+
+- **Result:** all nine programs passed all 21 tests, and all hash in parallel. Medians:
+
+  | | Overt | Rust | Go |
+  |---|---|---|---|
+  | tool calls (to first pass) | 8 (6) | 7 (6) | 4 (3) |
+  | input tokens (to first pass) | 448k (282k) | 276k (196k) | 163k (88k) |
+  | output tokens (thinking, roughly) | 7.1k (3.8k) | 8.8k (3.9k) | 6.5k (2.7k) |
+  | cost | $0.50 | $0.37 | $0.29 |
+  | failed builds | 1 | 0 | 0 |
+  | program (o200k tokens) | 2.1k | 3.5k | 2.5k |
+  | 520 MB tree: wall, CPU | 0.19 s, 2.5 s | 0.13 s, 1.8 s | 0.18 s, 2.4 s |
+  | docs: tokens, share of input | 14.9k, 29% | 0 | 0 |
+
+- **A first batch was set aside.** `tests/run.py` ran the program from inside each case's directory, so the command the prompt gives, `python3 tests/run.py bin/hashdir`, failed with a relative path. Seven of nine agents lost a round to it, and it counted as a failed build. The tests now make the path absolute. The batch is kept in `bench/results/02-hashdir.test-bug.jsonl`, and its real stumbles are counted below.
+- **Programs are smallest in Overt:** 40% smaller than Rust's and 17% smaller than Go's. `task.map` over `fs.walk` replaces the Rust and Go agents' thread pools, channels and hand-written directory walk. The extra thinking seen on `jsonfmt` didn't appear.
+- **Speed is close:** Overt matches Go and is 1.5 times Rust's time, with the work spread over 13 of 16 cores in all three languages.
+- **Correctness is where Overt loses.** Overt was the only language with failed builds, and every one came from an Overt rule:
+  - **The named-argument rule on `rotr(x, 7)`:** five of six Overt runs across both batches, plus two slips of mine while writing the reference and tests. Every time, the unnamed argument was a literal.
+  - **`h[0] +%= a`:** there's no compound form of the wrapping operators (one run).
+  - **`[u32; 64]`:** SPEC.md lists fixed-size arrays, which are planned for milestone 5 (one run).
+  - **`task.map(files, |p| hash_file(p))?`:** the call inside the closure needs its own `?`. The error didn't say so, and a second, confusing error followed on the outer `?` (one run).
+- **Fixed since:** literals needn't be named; `+%=` and the other operator assignments exist; `[T; N]`'s error suggests `[T]`; an unhandled failure in a closure says to use `?` there, and no longer causes a second error at the caller.
+- **The hypothesis, again:** Rust agents wrote correct concurrent code on their first build. The borrow checker never got in the way, because the agents chose scoped threads and channels. The rounds Overt is meant to save didn't exist here, and the rounds it cost came from its own strictness.
+
 ## Open questions
 
+- Cancelling fail-fast bodies that are already running, once milestone 3 has cancellation.
+- Chase-Lev deques instead of mutex run queues, if the mutexes show up in profiles.
 - Why do agents think two to three times as much when writing Overt, and does the spec's shape (more examples, fewer rules) change that?
 
 - Should a trap stop only its task? That needs unwinding and a policy for poisoned locks.

@@ -1,0 +1,14 @@
+// `fs.walk` lists everything below a directory, sorted by path, without
+// following links; `fs.list` lists one level.
+fn main() ! io, fail {
+  for e in fs.walk("walk_fixture")? {
+    print("${e.kind} ${e.path}")
+  }
+  print(fs.list("walk_fixture")?.map(|e| e.path))
+  let files = fs.walk("walk_fixture")?.filter(|e| e.kind == .File)
+  print(task.map(files, |e| fs.read("walk_fixture/" + e.path)?.trim())?)
+  _ = fs.walk("walk_fixture/missing") catch e {
+    print("${e.kind}")
+    []
+  }
+}

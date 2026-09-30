@@ -1,0 +1,7 @@
+fn main() ! io {
+  task.group(|g| {
+    g.spawn(|| print("x"))
+  })
+  let s = Shared.new(1)
+  let c = Chan[int].new(4)
+}

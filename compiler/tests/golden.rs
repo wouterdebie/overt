@@ -148,7 +148,7 @@ fn spec_code_blocks_are_canonical() {
 fn reference_programs_pass_task_tests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
-    for (name, task) in [("wordfreq", "01-wordfreq"), ("jsonfmt", "01-jsonfmt")] {
+    for (name, task) in [("wordfreq", "01-wordfreq"), ("jsonfmt", "01-jsonfmt"), ("hashdir", "02-hashdir")] {
         let dir = root.join("tests/programs").join(name);
         let bin = dir.join("bin").join(name);
         let out = ovt().current_dir(&dir).args(["build", "-o"]).arg(&bin).output().unwrap();

@@ -1,0 +1,3 @@
+later_concurrency.ovt:2:8: error: `task.group` isn't supported by this compiler yet (planned for milestone 3)
+later_concurrency.ovt:5:11: error: `Shared` isn't supported by this compiler yet (planned for milestone 3)
+later_concurrency.ovt:6:11: error: `Chan` isn't supported by this compiler yet (planned for milestone 3)

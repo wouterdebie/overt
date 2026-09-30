@@ -36,6 +36,19 @@ fn [T].extend(inout self, other: [T]) {
   }
 }
 
+// `n` copies, joined: `[0].repeat(64)` is 64 zeros.
+fn [T].repeat(self, n: int) -> [T]
+  pre n >= 0
+  ex [0].repeat(3) == [0, 0, 0]
+  ex [1, 2].repeat(2) == [1, 2, 1, 2]
+{
+  var out: [T] = []
+  for _i in 0..n {
+    out.extend(self)
+  }
+  return out
+}
+
 fn [T].first(self) -> ?T {
   if self.len() == 0 {
     return none

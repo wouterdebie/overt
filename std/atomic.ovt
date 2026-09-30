@@ -1,0 +1,15 @@
+// A number that tasks can read and change at the same time. Copies of an
+// `Atomic` share one number. It's written `Atomic[int]` or `Atomic`.
+type Atomic { _cell: fn() -> int }
+
+// A new atomic holding `v`.
+fn Atomic.new(v: int) -> Atomic
+
+// The current value.
+fn Atomic.load(self) -> int ! io
+
+// Replaces the value.
+fn Atomic.store(self, v: int) ! io
+
+// Adds `n`, and returns the new value.
+fn Atomic.add(self, n: int) -> int ! io

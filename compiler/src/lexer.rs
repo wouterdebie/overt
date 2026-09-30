@@ -155,6 +155,14 @@ pub enum P {
     StarEq,
     SlashEq,
     PercentEq,
+    PlusWEq,
+    MinusWEq,
+    StarWEq,
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    ShlEq,
+    ShrEq,
     Underscore,
 }
 
@@ -204,6 +212,14 @@ impl P {
             P::StarEq => "*=",
             P::SlashEq => "/=",
             P::PercentEq => "%=",
+            P::PlusWEq => "+%=",
+            P::MinusWEq => "-%=",
+            P::StarWEq => "*%=",
+            P::AmpEq => "&=",
+            P::PipeEq => "|=",
+            P::CaretEq => "^=",
+            P::ShlEq => "<<=",
+            P::ShrEq => ">>=",
             P::Underscore => "_",
         }
     }
@@ -212,6 +228,14 @@ impl P {
 // Longest first, so "..=" wins over "..", and ".." over ".".
 const PUNCTS: &[(&str, P)] = &[
     ("..=", P::DotDotEq),
+    ("+%=", P::PlusWEq),
+    ("-%=", P::MinusWEq),
+    ("*%=", P::StarWEq),
+    ("<<=", P::ShlEq),
+    (">>=", P::ShrEq),
+    ("&=", P::AmpEq),
+    ("|=", P::PipeEq),
+    ("^=", P::CaretEq),
     ("..", P::DotDot),
     ("=>", P::FatArrow),
     ("->", P::Arrow),

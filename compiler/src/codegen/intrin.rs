@@ -283,6 +283,17 @@ impl<'p> Gen<'p> {
                 self.fail_on_code(&code, &err);
                 self.emit_return(None);
             }
+            "fs.walk" | "fs.list" => {
+                let p = self.spill(&params[0]);
+                let out = self.alloca("%ovt.arr");
+                let err = self.alloca("%ovt.arr");
+                let deep = if key == "fs.walk" { 1 } else { 0 };
+                let code = self.tmp();
+                self.inst(&format!("{code} = call i32 @ovt_fs_list(ptr {p}, i32 {deep}, ptr {out}, ptr {err})"));
+                self.fail_on_code(&code, &err);
+                let v = self.load("%ovt.arr", &out);
+                self.emit_return(Some(v));
+            }
             "fs.exists" => {
                 let p = self.spill(&params[0]);
                 let r = self.tmp();
@@ -291,11 +302,199 @@ impl<'p> Gen<'p> {
                 self.inst(&format!("{b} = icmp ne i32 {r}, 0"));
                 self.emit_return(Some(V::new("i1", b)));
             }
+            "task.map" => self.task_map(params),
+            // An `Atomic` is a struct holding one closure-like value, whose
+            // environment {count, drop, mark, value} holds the number.
+            "Atomic.new" => {
+                let env = self.tmp();
+                self.inst(&format!("{env} = call ptr @ovt_alloc(i64 32)"));
+                self.inst(&format!("store i64 1, ptr {env}"));
+                for (off, f) in [(8, "@ovt_free"), (16, "@ovt_mark_none")] {
+                    let p = self.tmp();
+                    self.inst(&format!("{p} = getelementptr inbounds i8, ptr {env}, i64 {off}"));
+                    self.inst(&format!("store ptr {f}, ptr {p}"));
+                }
+                let vp = self.tmp();
+                self.inst(&format!("{vp} = getelementptr inbounds i8, ptr {env}, i64 24"));
+                self.inst(&format!("store {}, ptr {vp}", params[0].op()));
+                let ret = self.f.ret.clone();
+                let lt = self.lty(&ret);
+                let cell = self.insert(&V::new("%ovt.fn", "{ ptr null, ptr null }"), &V::new("ptr", env), 1);
+                let a = self.insert(&V::new(lt, "undef"), &cell, 0);
+                self.emit_return(Some(a));
+            }
+            "Atomic.load" | "Atomic.store" | "Atomic.add" => {
+                let cell = self.extract(&params[0], 0, "%ovt.fn");
+                let env = self.extract(&cell, 1, "ptr");
+                let vp = self.tmp();
+                self.inst(&format!("{vp} = getelementptr inbounds i8, ptr {}, i64 24", env.repr));
+                match key.as_str() {
+                    "Atomic.load" => {
+                        let v = self.tmp();
+                        self.inst(&format!("{v} = load atomic i64, ptr {vp} seq_cst, align 8"));
+                        self.emit_return(Some(V::new("i64", v)));
+                    }
+                    "Atomic.store" => {
+                        self.inst(&format!("store atomic {}, ptr {vp} seq_cst, align 8", params[1].op()));
+                        self.emit_return(None);
+                    }
+                    _ => {
+                        let old = self.tmp();
+                        self.inst(&format!("{old} = atomicrmw add ptr {vp}, {} seq_cst", params[1].op()));
+                        let new = self.tmp();
+                        self.inst(&format!("{new} = add i64 {old}, {}", params[1].repr));
+                        self.emit_return(Some(V::new("i64", new)));
+                    }
+                }
+            }
             other => {
                 // Builtins like `print` are handled by the checker and never called as functions.
                 self.trap(&format!("internal error: no implementation for `{other}`"), span);
             }
         }
         let _ = (Self::some, Self::none_of);
+    }
+
+    // ---- task.map ----
+    //
+    // `task.map(xs, f)` marks `xs` and `f` shared, then has the runtime run
+    // the body for every index on several tasks. Each body call stores its
+    // result, or its error, in a slot of its own, and sets a status byte:
+    // 1 for a result, 2 for an error. The context the bodies get is
+    // `{xs, f, results, errors, status}`.
+
+    const MAP_CTX: &'static str = "{ %ovt.arr, %ovt.fn, ptr, ptr, ptr }";
+
+    fn task_map(&mut self, params: &[V]) {
+        let t = self.f.targs[0].clone();
+        let u = self.f.targs[1].clone();
+        let failable = self.f.failable;
+        let xs = self.spill(&params[0]);
+        let mark = self.mark_fn(&Ty::array(t.clone()));
+        self.inst(&format!("call void {mark}(ptr {xs})"));
+        let env = self.extract(&params[1], 1, "ptr");
+        self.inst(&format!("call void @ovt_mark_env(ptr {})", env.repr));
+        let n = self.extract(&params[0], 2, "i64");
+        let usize = self.size_const(&u);
+        let buf = self.tmp();
+        self.inst(&format!("{buf} = call ptr @ovt_buf_new(i64 {}, i64 {usize})", n.repr));
+        let data = self.tmp();
+        self.inst(&format!("{data} = getelementptr inbounds i8, ptr {buf}, i64 24"));
+        let status = self.tmp();
+        self.inst(&format!("{status} = call ptr @ovt_calloc(i64 {})", n.repr));
+        let et = self.err_lty();
+        let errs = if failable {
+            let esize = self.tmp();
+            self.inst(&format!("{esize} = ptrtoint ptr getelementptr ({et}, ptr null, i32 1) to i64"));
+            let bytes = self.tmp();
+            self.inst(&format!("{bytes} = mul i64 {esize}, {}", n.repr));
+            let e = self.tmp();
+            self.inst(&format!("{e} = call ptr @ovt_alloc(i64 {bytes})"));
+            e
+        } else {
+            "null".to_string()
+        };
+        let ctx = self.alloca(Self::MAP_CTX);
+        for (i, (lt, v)) in [("%ovt.arr", params[0].repr.clone()), ("%ovt.fn", params[1].repr.clone()), ("ptr", data.clone()), ("ptr", errs.clone()), ("ptr", status.clone())].into_iter().enumerate() {
+            let p = self.gep(Self::MAP_CTX, &ctx, &[0, i]);
+            self.inst(&format!("store {lt} {v}, ptr {p}"));
+        }
+        let body = self.map_body(&t, &u, failable);
+        let r = self.tmp();
+        self.inst(&format!("{r} = call i64 @ovt_parallel(i64 {}, ptr {body}, ptr {ctx})", n.repr));
+        let ok = self.label("mapped");
+        if failable {
+            let bad = self.tmp();
+            self.inst(&format!("{bad} = icmp ne i64 {r}, -1"));
+            let fail = self.label("map_failed");
+            self.term(&format!("br i1 {bad}, label %{fail}, label %{ok}"));
+            self.start(&fail);
+            let drop = self.drop_fn(&u);
+            self.inst(&format!("call void @ovt_parallel_cleanup(ptr {status}, i64 {}, ptr {data}, i64 {usize}, ptr {drop}, ptr {errs}, i64 {r})", n.repr));
+            let errp = self.tmp();
+            self.inst(&format!("{errp} = getelementptr inbounds {et}, ptr {errs}, i64 {r}"));
+            let err = self.load(&et, &errp);
+            self.inst(&format!("call void @ovt_free(ptr {status})"));
+            self.inst(&format!("call void @ovt_free(ptr {errs})"));
+            // Nothing is in the buffer yet, so this just frees it.
+            self.inst(&format!("call void @ovt_buf_release(ptr {buf}, i64 {usize}, ptr null)"));
+            self.emit_fail(err);
+        } else {
+            self.term(&format!("br label %{ok}"));
+        }
+        self.start(&ok);
+        let usedp = self.tmp();
+        self.inst(&format!("{usedp} = getelementptr inbounds i8, ptr {buf}, i64 16"));
+        self.inst(&format!("store i64 {}, ptr {usedp}", n.repr));
+        self.inst(&format!("call void @ovt_free(ptr {status})"));
+        if failable {
+            self.inst(&format!("call void @ovt_free(ptr {errs})"));
+        }
+        let a = V::new("%ovt.arr", "undef");
+        let a = self.insert(&a, &V::new("ptr", buf), 0);
+        let a = self.insert(&a, &V::new("i64", "0"), 1);
+        let a = self.insert(&a, &n, 2);
+        self.emit_return(Some(a));
+    }
+
+    /// `i32 body(ptr ctx, i64 i)`: calls `f(xs[i])` and stores what it gives.
+    pub fn emit_map_body(&mut self, t: &Ty, u: &Ty, failable: bool, sym: &str) -> String {
+        self.f = Fx { cur: "entry".into(), ..Default::default() };
+        let ctx = Self::MAP_CTX;
+        let xsp = self.gep(ctx, "%ctx", &[0, 0]);
+        let fp = self.gep(ctx, "%ctx", &[0, 1]);
+        let f = self.load("%ovt.fn", &fp);
+        let mut slots = Vec::new();
+        for i in 2..5 {
+            let p = self.gep(ctx, "%ctx", &[0, i]);
+            slots.push(self.load("ptr", &p).repr);
+        }
+        let (data, errs, status) = (slots[0].clone(), slots[1].clone(), slots[2].clone());
+        let ep = self.elem_ptr(&xsp, "%i", t);
+        let tl = self.lty(t);
+        let x = self.load(&tl, &ep);
+        let func = self.extract(&f, 0, "ptr");
+        let env = self.extract(&f, 1, "ptr");
+        let stp = self.tmp();
+        self.inst(&format!("{stp} = getelementptr inbounds i8, ptr {status}, i64 %i"));
+        let rt = self.ret_lty(u, failable);
+        let ul = self.lty(u);
+        let value = if rt == "void" {
+            self.inst(&format!("call void {}(ptr {}, {})", func.repr, env.repr, x.op()));
+            None
+        } else {
+            let r = self.tmp();
+            self.inst(&format!("{r} = call {rt} {}(ptr {}, {})", func.repr, env.repr, x.op()));
+            let r = V::new(rt.clone(), r);
+            if failable {
+                let failed = self.extract(&r, 0, "i1");
+                let bad = self.label("failed");
+                let ok = self.label("ok");
+                self.term(&format!("br i1 {}, label %{bad}, label %{ok}", failed.repr));
+                self.start(&bad);
+                let et = self.err_lty();
+                let e = self.extract(&r, 2, &et);
+                let errp = self.tmp();
+                self.inst(&format!("{errp} = getelementptr inbounds {et}, ptr {errs}, i64 %i"));
+                self.inst(&format!("store {}, ptr {errp}", e.op()));
+                self.inst(&format!("store i8 2, ptr {stp}"));
+                self.term("ret i32 1");
+                self.start(&ok);
+                Some(self.extract(&r, 1, &ul))
+            } else {
+                Some(r)
+            }
+        };
+        if let Some(v) = value {
+            if ul != "{}" {
+                let up = self.tmp();
+                self.inst(&format!("{up} = getelementptr inbounds {ul}, ptr {data}, i64 %i"));
+                self.inst(&format!("store {}, ptr {up}", v.op()));
+            }
+        }
+        self.inst(&format!("store i8 1, ptr {stp}"));
+        self.term("ret i32 0");
+        let f = std::mem::take(&mut self.f);
+        format!("define internal i32 {sym}(ptr %ctx, i64 %i) {{\nentry:\n{}{}}}\n", f.allocas, f.code)
     }
 }

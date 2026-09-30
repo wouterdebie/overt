@@ -9,7 +9,7 @@ impl<'p> Gen<'p> {
     pub fn emit_helper(&mut self, kind: Helper, ty: &Ty, sym: &str) -> String {
         self.f = Fx { cur: "entry".into(), ..Default::default() };
         let (params, ret) = match kind {
-            Helper::Dup | Helper::Drop => ("ptr %p", "void"),
+            Helper::Dup | Helper::Drop | Helper::Mark => ("ptr %p", "void"),
             Helper::Eq => ("ptr %a, ptr %b", "i1"),
             Helper::Cmp => ("ptr %a, ptr %b", "i32"),
             Helper::Hash => ("ptr %p", "i64"),
@@ -18,6 +18,10 @@ impl<'p> Gen<'p> {
         match kind {
             Helper::Dup | Helper::Drop => {
                 self.gen_rc(ty, "%p", kind == Helper::Dup);
+                self.term("ret void");
+            }
+            Helper::Mark => {
+                self.gen_mark(ty, "%p");
                 self.term("ret void");
             }
             Helper::Eq => {
@@ -117,12 +121,13 @@ impl<'p> Gen<'p> {
                         }
                         _ => ("1".into(), "null".into()),
                     };
-                    // Fast path: other copies remain, so just decrement.
+                    // Fast path: owned by this task, with other copies left, so
+                    // just decrement. The runtime handles the rest.
                     let nn = self.tmp();
                     self.inst(&format!("{nn} = icmp ne ptr {}, null", buf.repr));
                     let b = buf.repr.clone();
                     self.when(&nn, |g| {
-                        let rc = g.load("i64", &b);
+                        let rc = g.load_rc(&b);
                         let shared = g.tmp();
                         g.inst(&format!("{shared} = icmp sgt i64 {}, 1", rc.repr));
                         let dec = g.label("dec");
@@ -147,26 +152,28 @@ impl<'p> Gen<'p> {
                 let nn = self.tmp();
                 self.inst(&format!("{nn} = icmp ne ptr {}, null", env.repr));
                 let env = env.repr.clone();
-                self.when(&nn, |g| {
-                    let rc = g.load("i64", &env);
-                    if dup {
-                        let n = g.tmp();
-                        g.inst(&format!("{n} = add i64 {}, 1", rc.repr));
-                        g.inst(&format!("store i64 {n}, ptr {env}"));
-                    } else {
+                if dup {
+                    self.when(&nn, |g| g.inc_count(&env, false));
+                } else {
+                    self.when(&nn, |g| {
+                        let rc = g.load_rc(&env);
+                        let many = g.tmp();
+                        g.inst(&format!("{many} = icmp sgt i64 {}, 1", rc.repr));
+                        let dec = g.label("dec");
+                        let release = g.label("release");
+                        let done = g.label("dropped");
+                        g.term(&format!("br i1 {many}, label %{dec}, label %{release}"));
+                        g.start(&dec);
                         let n = g.tmp();
                         g.inst(&format!("{n} = sub i64 {}, 1", rc.repr));
                         g.inst(&format!("store i64 {n}, ptr {env}"));
-                        let zero = g.tmp();
-                        g.inst(&format!("{zero} = icmp eq i64 {n}, 0"));
-                        g.when(&zero, |g| {
-                            let dp = g.tmp();
-                            g.inst(&format!("{dp} = getelementptr inbounds i8, ptr {env}, i64 8"));
-                            let d = g.load("ptr", &dp);
-                            g.inst(&format!("call void {}(ptr {env})", d.repr));
-                        });
-                    }
-                });
+                        g.term(&format!("br label %{done}"));
+                        g.start(&release);
+                        g.inst(&format!("call void @ovt_env_release(ptr {env})"));
+                        g.term(&format!("br label %{done}"));
+                        g.start(&done);
+                    });
+                }
             }
             Ty::Opt(inner) => {
                 let lt = self.lty(ty);
@@ -210,28 +217,97 @@ impl<'p> Gen<'p> {
         }
     }
 
-    /// Adds one to the count at the start of `ptr`, unless it's null or a static (count 0) buffer.
-    fn inc_count(&mut self, ptr: &str, may_be_static: bool) {
+    /// Adds one to the count at the start of `ptr`, unless it's null. A
+    /// count owned by this task changes inline; a shared or static one goes
+    /// through the runtime.
+    fn inc_count(&mut self, ptr: &str, _may_be_static: bool) {
         let nn = self.tmp();
         self.inst(&format!("{nn} = icmp ne ptr {ptr}, null"));
         let ptr = ptr.to_string();
         self.when(&nn, |g| {
-            let rc = g.load("i64", &ptr);
-            if may_be_static {
-                let pos = g.tmp();
-                g.inst(&format!("{pos} = icmp sgt i64 {}, 0", rc.repr));
-                let rcv = rc.repr.clone();
-                g.when(&pos, |g| {
-                    let n = g.tmp();
-                    g.inst(&format!("{n} = add i64 {rcv}, 1"));
-                    g.inst(&format!("store i64 {n}, ptr {ptr}"));
-                });
-            } else {
-                let n = g.tmp();
-                g.inst(&format!("{n} = add i64 {}, 1", rc.repr));
-                g.inst(&format!("store i64 {n}, ptr {ptr}"));
-            }
+            let rc = g.load_rc(&ptr);
+            let owned = g.tmp();
+            g.inst(&format!("{owned} = icmp sgt i64 {}, 0", rc.repr));
+            let inc = g.label("inc");
+            let slow = g.label("shared");
+            let done = g.label("counted");
+            g.term(&format!("br i1 {owned}, label %{inc}, label %{slow}"));
+            g.start(&inc);
+            let n = g.tmp();
+            g.inst(&format!("{n} = add i64 {}, 1", rc.repr));
+            g.inst(&format!("store i64 {n}, ptr {ptr}"));
+            g.term(&format!("br label %{done}"));
+            g.start(&slow);
+            g.inst(&format!("call void @ovt_rc_inc(ptr {ptr})"));
+            g.term(&format!("br label %{done}"));
+            g.start(&done);
         });
+    }
+
+    // ---- marking shared ----
+
+    /// Marks the counts of everything the value at `p` holds as shared.
+    fn gen_mark(&mut self, ty: &Ty, p: &str) {
+        match ty {
+            Ty::Str | Ty::Array(_) => {
+                let buf = self.load("ptr", p);
+                let (esize, mark) = match ty {
+                    Ty::Array(e) => {
+                        let s = self.size_const(e);
+                        (s, self.mark_fn(e))
+                    }
+                    _ => ("1".into(), "null".into()),
+                };
+                self.inst(&format!("call void @ovt_mark_buf(ptr {}, i64 {esize}, ptr {mark})", buf.repr));
+            }
+            Ty::Fn(_) => {
+                let envp = self.gep("%ovt.fn", p, &[0, 1]);
+                let env = self.load("ptr", &envp);
+                self.inst(&format!("call void @ovt_mark_env(ptr {})", env.repr));
+            }
+            Ty::Opt(inner) => {
+                let lt = self.lty(ty);
+                let tagp = self.gep(&lt, p, &[0, 0]);
+                let tag = self.load("i1", &tagp);
+                let ip = self.gep(&lt, p, &[0, 1]);
+                let inner = (**inner).clone();
+                self.when(&tag.repr, |g| g.mark_value(&inner, &ip));
+            }
+            Ty::Tuple(_) => self.mark_fields(ty, None, p),
+            Ty::Adt(id, _) if self.p.adts[*id].is_enum() => {
+                if self.is_payloadless_enum(*id) {
+                    return;
+                }
+                let tyc = ty.clone();
+                self.per_variant(ty, p, |g, v, payload| g.mark_fields(&tyc, Some(v), payload));
+            }
+            Ty::Adt(..) => self.mark_fields(ty, None, p),
+            _ => {}
+        }
+    }
+
+    fn mark_value(&mut self, ty: &Ty, p: &str) {
+        if self.needs_rc(ty) {
+            let h = self.helper(Helper::Mark, ty);
+            self.inst(&format!("call void {h}(ptr {p})"));
+        }
+    }
+
+    fn mark_fields(&mut self, ty: &Ty, variant: Option<usize>, p: &str) {
+        let (lt, fields) = self.components(ty, variant);
+        for (i, (boxed, fty)) in fields.iter().enumerate() {
+            if !boxed && !self.needs_rc(fty) {
+                continue;
+            }
+            let fp = self.gep(&lt, p, &[0, i]);
+            if *boxed {
+                let bx = self.load("ptr", &fp);
+                let mark = self.mark_fn(fty);
+                self.inst(&format!("call void @ovt_mark_box(ptr {}, ptr {mark})", bx.repr));
+            } else {
+                self.mark_value(fty, &fp);
+            }
+        }
     }
 
     // ---- equality ----

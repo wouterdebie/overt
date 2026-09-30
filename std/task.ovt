@@ -1,0 +1,7 @@
+// Running work at the same time. Tasks share nothing: what a task is given is
+// a copy, so tasks can't change each other's data.
+
+// Calls `f` on every element at the same time, and keeps the results in
+// order. Stops at the first failure.
+fn map[T, U, !E](xs: [T], f: fn(T) -> U ! E) -> [U] ! E
+  ex task.map([1, 2, 3], |x| x * 2) == [2, 4, 6]

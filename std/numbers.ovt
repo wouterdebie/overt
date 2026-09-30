@@ -42,6 +42,63 @@ fn int.pow(self, exp: int) -> int
   return out
 }
 
+// Lowercase hex digits, as few as needed, with `-` in front of a negative number.
+fn int.hex(self) -> str
+  ex 255.hex() == "ff"
+  ex 0.hex() == "0"
+  ex (-26).hex() == "-1a"
+{
+  if self < 0 {
+    return "-" + (-self).hex()
+  }
+  var n = self
+  var out: [u8] = []
+  while true {
+    out.push(_HEX[n % 16])
+    n /= 16
+    if n == 0 {
+      break
+    }
+  }
+  out.reverse()
+  return str.from_bytes(out) else trap("hex digits are ASCII")
+}
+
+// Exactly 2 lowercase hex digits.
+fn u8.hex(self) -> str
+  ex u8(10).hex() == "0a"
+{
+  return _hex_digits(u64(self), 2)
+}
+
+// Exactly 8 lowercase hex digits.
+fn u32.hex(self) -> str
+  ex u32(255).hex() == "000000ff"
+{
+  return _hex_digits(u64(self), 8)
+}
+
+// Exactly 16 lowercase hex digits.
+fn u64.hex(self) -> str
+  ex u64(1).hex() == "0000000000000001"
+{
+  return _hex_digits(self, 16)
+}
+
+const _HEX: str = "0123456789abcdef"
+
+fn _hex_digits(v: u64, count: int) -> str {
+  var out = [u8(0)].repeat(count)
+  var n = v
+  var i = count - 1
+  while i >= 0 {
+    out[i] = _HEX[int(n % 16)]
+    n /= 16
+    i -= 1
+  }
+  return str.from_bytes(out) else trap("hex digits are ASCII")
+}
+
 // Parses a decimal number like `1.5`, `-2` or `3e8`. Fails with `.Invalid` otherwise.
 fn f64.parse(s: str) -> f64 ! fail
   ex f64.parse("1.5") == 1.5

@@ -277,6 +277,15 @@ pub enum TStmt {
     ForArray { elem: LocalId, index: Option<LocalId>, array: TExpr, place: Option<TPlace>, body: TBlock },
     /// `for k, v in m` over a `Map`, or `for x in s` over a `Set` (`value` is `None`).
     ForMap { key: LocalId, value: Option<LocalId>, map: TExpr, is_set: bool, body: TBlock },
+    /// `par { ... }`: each statement is a closure run at the same time as the
+    /// others, returning the variables it declares; `outs` receive them.
+    Par { branches: Vec<TParBranch> },
+}
+
+#[derive(Clone)]
+pub struct TParBranch {
+    pub closure: TExpr,
+    pub outs: Vec<LocalId>,
 }
 
 #[derive(Clone)]
