@@ -23,7 +23,7 @@ impl<'p> Gen<'p> {
     }
 
     /// Fails with `kind` (an ErrKind index, maybe dynamic) and an owned message.
-    fn fail_with(&mut self, kind: &str, msg: V) {
+    pub fn fail_with(&mut self, kind: &str, msg: V) {
         let et = self.err_lty();
         let e = V::new(et, "undef");
         let e = self.insert(&e, &V::new("i32", kind), 0);
@@ -43,7 +43,7 @@ impl<'p> Gen<'p> {
 
     /// Calls a runtime function returning 0 for success or an ErrKind + 1,
     /// with the message in `err`; fails on error.
-    fn fail_on_code(&mut self, code: &str, err: &str) {
+    pub fn fail_on_code(&mut self, code: &str, err: &str) {
         let bad = self.tmp();
         self.inst(&format!("{bad} = icmp ne i32 {code}, 0"));
         let fail = self.label("failed");
@@ -59,6 +59,10 @@ impl<'p> Gen<'p> {
 
     pub fn intrinsic_body(&mut self, f: FnId, params: &[V]) {
         let key = self.intrinsic_key(f);
+        let fspan = self.p.fns[f].span;
+        if self.handle_intrinsic(f, &key, params, fspan) {
+            return;
+        }
         let elem = self.f.targs.first().cloned().unwrap_or(Ty::Error);
         let span = self.p.fns[f].span;
         let arr_fns = |g: &mut Self| {

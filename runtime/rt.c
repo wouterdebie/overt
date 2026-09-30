@@ -744,9 +744,51 @@ typedef struct ovt_group ovt_group;
 typedef struct {
   int state; // W_*, changed atomically
   ovt_task *task;
+  int result; // set by the waker, for waits that can end in several ways (R_*)
 } ovt_waiter;
 
 enum { W_WAITING, W_PARKED, W_DONE };
+enum { R_READY, R_TIMEOUT, R_CANCELLED, R_CLOSED };
+
+// A cancel scope. Every task belongs to one; cancelling a scope cancels the
+// scopes below it. A cancelled task's next failing `io` call fails with
+// `.Cancelled`, and a task waiting on a socket or a timer wakes up to fail.
+typedef struct ovt_cancel {
+  int64_t rc;    // changed atomically
+  int cancelled; // changed atomically
+  int timed_out; // cancelled by a task.timeout deadline
+  struct ovt_cancel *parent;
+} ovt_cancel;
+
+static ovt_cancel *cancel_new(ovt_cancel *parent) {
+  ovt_cancel *c = ovt_alloc(sizeof(ovt_cancel));
+  c->rc = 1;
+  c->cancelled = 0;
+  c->timed_out = 0;
+  c->parent = parent;
+  if (parent) __atomic_add_fetch(&parent->rc, 1, __ATOMIC_RELAXED);
+  return c;
+}
+
+static void cancel_ref(ovt_cancel *c) {
+  if (c) __atomic_add_fetch(&c->rc, 1, __ATOMIC_RELAXED);
+}
+
+static void cancel_unref(ovt_cancel *c) {
+  while (c && __atomic_sub_fetch(&c->rc, 1, __ATOMIC_ACQ_REL) == 0) {
+    ovt_cancel *p = c->parent;
+    free(c);
+    c = p;
+  }
+}
+
+static void cancel_scope(ovt_cancel *c);
+
+static int is_cancelled(ovt_cancel *c) {
+  for (; c; c = c->parent)
+    if (__atomic_load_n(&c->cancelled, __ATOMIC_ACQUIRE)) return 1;
+  return 0;
+}
 
 struct ovt_task {
   ovt_ctx ctx;
@@ -758,6 +800,7 @@ struct ovt_task {
   ovt_group *group;   // told when this task finishes
   int action;         // what the scheduler does once the task has switched out
   ovt_waiter *waiter; // what it parked on
+  ovt_cancel *cancel; // its cancel scope (a reference), or NULL
   ovt_task *next;     // run queue link
 #ifdef OVT_TSAN
   void *fiber;
@@ -981,14 +1024,17 @@ struct ovt_group {
   int64_t first_bad; // the lowest index that failed
   int64_t pending;   // helper tasks still running, plus one for the caller
   ovt_waiter done;   // woken by the last helper to finish
+  ovt_cancel *scope; // cancelled by the first failure
 };
 
-static ovt_task *task_new(int32_t (*fn)(void *), void *arg, size_t stack_size, ovt_group *g) {
+static ovt_task *task_new(int32_t (*fn)(void *), void *arg, size_t stack_size, ovt_group *g, ovt_cancel *cancel) {
   ovt_task *t = ovt_alloc(sizeof(ovt_task));
   memset(t, 0, sizeof *t);
   t->fn = fn;
   t->arg = arg;
   t->group = g;
+  t->cancel = cancel;
+  cancel_ref(cancel);
   t->stack_size = stack_size;
   t->stack = stack_new(stack_size);
   uintptr_t top = ((uintptr_t)t->stack + stack_size) & ~(uintptr_t)15;
@@ -1036,6 +1082,7 @@ static void after_switch(ovt_worker *w, ovt_task *t) {
       break;
     }
     ovt_group *g = t->group;
+    cancel_unref(t->cancel);
     stack_free(t->stack, t->stack_size);
 #ifdef OVT_TSAN
     __tsan_destroy_fiber(t->fiber);
@@ -1122,7 +1169,7 @@ static void run_indices(ovt_group *g) {
     int64_t i = __atomic_fetch_add(&g->next, 1, __ATOMIC_RELAXED);
     if (i >= g->n) return;
     if (g->body(g->ctx, i)) {
-      __atomic_store_n(&g->failed, 1, __ATOMIC_RELEASE);
+      if (!__atomic_exchange_n(&g->failed, 1, __ATOMIC_ACQ_REL)) cancel_scope(g->scope);
       int64_t cur = __atomic_load_n(&g->first_bad, __ATOMIC_RELAXED);
       while (i < cur && !__atomic_compare_exchange_n(&g->first_bad, &cur, i, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
       }
@@ -1171,15 +1218,25 @@ int64_t ovt_parallel(int64_t n, int32_t (*body)(void *, int64_t), void *ctx) {
   g.first_bad = INT64_MAX;
   waiter_init(&g.done);
   int64_t helpers = (n < nworkers ? n : nworkers) - 1;
-  if (!g.done.task) helpers = 0;
+  ovt_task *self = g.done.task;
+  if (!self) helpers = 0;
   g.pending = helpers + 1;
+  // A scope of its own, cancelled by the first failure, so the other bodies
+  // stop at their next `io` call.
+  ovt_cancel *outer = self ? self->cancel : NULL;
+  ovt_cancel *scope = cancel_new(outer);
+  g.scope = scope;
   if (helpers > 0) {
     pthread_once(&workers_once, start_workers);
-    for (int64_t k = 0; k < helpers; k++) make_runnable(task_new(group_helper, &g, STACK_SIZE, &g));
+    for (int64_t k = 0; k < helpers; k++) make_runnable(task_new(group_helper, &g, STACK_SIZE, &g, scope));
   }
-  // The calling task takes part too; if a helper finishes last, it wakes us.
+  // The calling task takes part too, in the same scope; if a helper finishes
+  // last, it wakes us.
+  if (self) self->cancel = scope;
   run_indices(&g);
+  if (self) self->cancel = outer;
   if (__atomic_sub_fetch(&g.pending, 1, __ATOMIC_ACQ_REL) > 0) wait_for(&g.done);
+  cancel_unref(scope);
   return g.first_bad == INT64_MAX ? -1 : g.first_bad;
 }
 
@@ -1249,6 +1306,1152 @@ static void blocking(void (*fn)(void *), void *arg) {
   wait_for(&j.done);
 }
 
+// ---- the poller ----
+//
+// One thread runs kqueue for every task that waits on a socket or a timer.
+// A waiting task hands the poller a request and parks on a waiter in its own
+// frame; the poller wakes it once, with R_READY, R_TIMEOUT or R_CANCELLED.
+// Requests belong to the poller from then on, and only its thread touches
+// them, so an fd event, a deadline and a cancellation can't both wake a task.
+
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/event.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <time.h>
+
+static void str_from(ovt_str *out, const char *p, int64_t n);
+
+typedef struct preq {
+  int fd; // -1 for a plain timer
+  int16_t filter;
+  int registered; // an fd event is registered with kqueue
+  int64_t deadline; // monotonic ns, 0 for none
+  ovt_waiter *w; // NULL for a deadline that cancels `expire`
+  ovt_cancel *cancel; // the waiting task's scope (a reference)
+  ovt_cancel *expire; // for task.timeout: the scope to cancel at the deadline (a reference)
+  int done;
+  int64_t heap_at; // index in the timer heap, or -1
+  struct preq *prev, *next; // the live list
+  struct preq *free_next;
+} preq;
+
+enum { M_WAIT, M_CANCEL, M_EXPIRE, M_UNEXPIRE };
+
+typedef struct msg {
+  int kind;
+  preq *req;
+  ovt_cancel *scope; // for M_CANCEL and M_UNEXPIRE (a reference)
+  struct msg *next;
+} msg;
+
+static int kq = -1;
+static pthread_once_t poller_once = PTHREAD_ONCE_INIT;
+static int poller_started; // changed atomically
+static pthread_mutex_t sub_mu = PTHREAD_MUTEX_INITIALIZER;
+static msg *sub_head, *sub_tail;
+// Only the poller thread touches these.
+static preq *live_head;
+static preq **heap;
+static int64_t heap_len, heap_cap;
+
+static int64_t now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+static void heap_swap(int64_t a, int64_t b) {
+  preq *t = heap[a];
+  heap[a] = heap[b];
+  heap[b] = t;
+  heap[a]->heap_at = a;
+  heap[b]->heap_at = b;
+}
+
+static void heap_up(int64_t i) {
+  while (i > 0 && heap[(i - 1) / 2]->deadline > heap[i]->deadline) {
+    heap_swap(i, (i - 1) / 2);
+    i = (i - 1) / 2;
+  }
+}
+
+static void heap_down(int64_t i) {
+  for (;;) {
+    int64_t l = 2 * i + 1, r = l + 1, m = i;
+    if (l < heap_len && heap[l]->deadline < heap[m]->deadline) m = l;
+    if (r < heap_len && heap[r]->deadline < heap[m]->deadline) m = r;
+    if (m == i) return;
+    heap_swap(i, m);
+    i = m;
+  }
+}
+
+static void heap_push(preq *r) {
+  if (heap_len == heap_cap) {
+    heap_cap = heap_cap ? heap_cap * 2 : 64;
+    heap = realloc(heap, sizeof(preq *) * (size_t)heap_cap);
+    if (!heap) oom();
+  }
+  r->heap_at = heap_len;
+  heap[heap_len++] = r;
+  heap_up(r->heap_at);
+}
+
+static void heap_remove(preq *r) {
+  int64_t i = r->heap_at;
+  if (i < 0) return;
+  heap_len--;
+  if (i != heap_len) {
+    heap[i] = heap[heap_len];
+    heap[i]->heap_at = i;
+    heap_down(i);
+    heap_up(i);
+  }
+  r->heap_at = -1;
+}
+
+static void live_push(preq *r) {
+  r->prev = NULL;
+  r->next = live_head;
+  if (live_head) live_head->prev = r;
+  live_head = r;
+}
+
+static void live_remove(preq *r) {
+  if (r->prev) r->prev->next = r->next;
+  else if (live_head == r) live_head = r->next;
+  if (r->next) r->next->prev = r->prev;
+  r->prev = r->next = NULL;
+}
+
+// Ends a request and wakes its task. The request is freed after the current
+// batch of events, which may still mention it.
+static void complete(preq *r, int result, preq **freed) {
+  r->done = 1;
+  if (r->registered && result != R_READY) {
+    struct kevent ev;
+    EV_SET(&ev, r->fd, r->filter, EV_DELETE, 0, 0, NULL);
+    kevent(kq, &ev, 1, NULL, 0, NULL);
+  }
+  heap_remove(r);
+  live_remove(r);
+  if (r->w) {
+    r->w->result = result;
+    wake(r->w);
+  }
+  r->free_next = *freed;
+  *freed = r;
+}
+
+static void cancel_live(preq **freed) {
+  for (preq *r = live_head, *next; r; r = next) {
+    next = r->next;
+    if (is_cancelled(r->cancel)) complete(r, R_CANCELLED, freed);
+  }
+}
+
+static void drain_submissions(preq **freed) {
+  pthread_mutex_lock(&sub_mu);
+  msg *m = sub_head;
+  sub_head = sub_tail = NULL;
+  pthread_mutex_unlock(&sub_mu);
+  while (m) {
+    msg *next = m->next;
+    preq *r = m->req;
+    switch (m->kind) {
+    case M_WAIT:
+      live_push(r);
+      if (is_cancelled(r->cancel)) {
+        complete(r, R_CANCELLED, freed);
+        break;
+      }
+      if (r->fd >= 0) {
+        struct kevent ev;
+        EV_SET(&ev, r->fd, r->filter, EV_ADD | EV_ONESHOT, 0, 0, r);
+        if (kevent(kq, &ev, 1, NULL, 0, NULL) < 0) {
+          // Let the task retry its call and see the error.
+          complete(r, R_READY, freed);
+          break;
+        }
+        r->registered = 1;
+      }
+      if (r->deadline) heap_push(r);
+      break;
+    case M_CANCEL:
+      cancel_live(freed);
+      cancel_unref(m->scope);
+      break;
+    case M_EXPIRE:
+      heap_push(r);
+      break;
+    case M_UNEXPIRE:
+      for (int64_t i = 0; i < heap_len; i++) {
+        if (heap[i]->expire == m->scope) {
+          preq *x = heap[i];
+          heap_remove(x);
+          x->done = 1;
+          x->free_next = *freed;
+          *freed = x;
+          break;
+        }
+      }
+      cancel_unref(m->scope);
+      break;
+    }
+    free(m);
+    m = next;
+  }
+}
+
+static void *poller_thread(void *arg) {
+  (void)arg;
+  struct kevent evs[256];
+  for (;;) {
+    struct timespec ts, *tsp = NULL;
+    if (heap_len) {
+      int64_t d = heap[0]->deadline - now_ns();
+      if (d < 0) d = 0;
+      ts.tv_sec = d / 1000000000;
+      ts.tv_nsec = d % 1000000000;
+      tsp = &ts;
+    }
+    int n = kevent(kq, NULL, 0, evs, 256, tsp);
+    preq *freed = NULL;
+    for (int i = 0; i < n; i++) {
+      if (evs[i].filter == EVFILT_USER) {
+        drain_submissions(&freed);
+        continue;
+      }
+      preq *r = evs[i].udata;
+      if (!r->done) {
+        r->registered = 0; // one-shot: kqueue has removed it
+        complete(r, R_READY, &freed);
+      }
+    }
+    int64_t now = now_ns();
+    while (heap_len && heap[0]->deadline <= now) {
+      preq *r = heap[0];
+      if (r->expire) {
+        heap_remove(r);
+        r->done = 1;
+        __atomic_store_n(&r->expire->timed_out, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&r->expire->cancelled, 1, __ATOMIC_RELEASE);
+        cancel_live(&freed);
+        r->free_next = freed;
+        freed = r;
+      } else {
+        complete(r, R_TIMEOUT, &freed);
+      }
+    }
+    while (freed) {
+      preq *r = freed;
+      freed = r->free_next;
+      cancel_unref(r->cancel);
+      cancel_unref(r->expire);
+      free(r);
+    }
+  }
+  return NULL;
+}
+
+static void poller_start(void) {
+  kq = kqueue();
+  if (kq < 0) {
+    fputs("trap: can't create a kqueue\n", stderr);
+    _exit(OVT_TRAP_STATUS);
+  }
+  struct kevent ev;
+  EV_SET(&ev, 1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+  kevent(kq, &ev, 1, NULL, 0, NULL);
+  pthread_t th;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  if (pthread_create(&th, &attr, poller_thread, NULL) != 0) {
+    fputs("trap: can't start the poller thread\n", stderr);
+    _exit(OVT_TRAP_STATUS);
+  }
+  pthread_attr_destroy(&attr);
+  __atomic_store_n(&poller_started, 1, __ATOMIC_RELEASE);
+}
+
+static void submit(int kind, preq *r, ovt_cancel *scope) {
+  pthread_once(&poller_once, poller_start);
+  msg *m = ovt_alloc(sizeof(msg));
+  m->kind = kind;
+  m->req = r;
+  m->scope = scope;
+  m->next = NULL;
+  pthread_mutex_lock(&sub_mu);
+  if (sub_tail) sub_tail->next = m;
+  else sub_head = m;
+  sub_tail = m;
+  pthread_mutex_unlock(&sub_mu);
+  struct kevent ev;
+  EV_SET(&ev, 1, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+  kevent(kq, &ev, 1, NULL, 0, NULL);
+}
+
+// Cancels a scope: its tasks' next io calls fail, and those waiting on the
+// poller wake up.
+static void cancel_scope(ovt_cancel *c) {
+  if (!c) return;
+  __atomic_store_n(&c->cancelled, 1, __ATOMIC_RELEASE);
+  if (__atomic_load_n(&poller_started, __ATOMIC_ACQUIRE)) {
+    cancel_ref(c);
+    submit(M_CANCEL, NULL, c);
+  }
+}
+
+static int task_cancelled(void) {
+  ovt_task *t = cur_task();
+  return t && is_cancelled(t->cancel);
+}
+
+// Parks the current task until `fd` is ready for `filter` (or, with fd -1,
+// until the deadline), the deadline passes, or its scope is cancelled.
+static int wait_io(int fd, int16_t filter, int64_t deadline) {
+  ovt_task *t = cur_task();
+  if (is_cancelled(t->cancel)) return R_CANCELLED;
+  preq *r = ovt_alloc(sizeof(preq));
+  memset(r, 0, sizeof *r);
+  r->fd = fd;
+  r->filter = filter;
+  r->deadline = deadline;
+  r->heap_at = -1;
+  r->cancel = t->cancel;
+  cancel_ref(r->cancel);
+  ovt_waiter w;
+  waiter_init(&w);
+  r->w = &w;
+  submit(M_WAIT, r, NULL);
+  wait_for(&w);
+  return w.result;
+}
+
+static void raise_file_limit(void) {
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_NOFILE, &rl) != 0) return;
+  rlim_t want = rl.rlim_max;
+  int max = 0;
+  size_t len = sizeof max;
+  if (sysctlbyname("kern.maxfilesperproc", &max, &len, NULL, 0) == 0 && max > 0 && (rlim_t)max < want) want = (rlim_t)max;
+  if (want > rl.rlim_cur) {
+    rl.rlim_cur = want;
+    setrlimit(RLIMIT_NOFILE, &rl);
+  }
+}
+
+// ---- task locks ----
+//
+// A lock for tasks: a task that has to wait parks instead of blocking its
+// worker thread. Unlocking hands the lock to the first waiter.
+
+typedef struct twait {
+  ovt_waiter w;
+  struct twait *next;
+} twait;
+
+typedef struct {
+  pthread_mutex_t mu;
+  int locked;
+  twait *head, *tail;
+} tmutex;
+
+static void tlock(tmutex *m) {
+  pthread_mutex_lock(&m->mu);
+  if (!m->locked) {
+    m->locked = 1;
+    pthread_mutex_unlock(&m->mu);
+    return;
+  }
+  twait tw;
+  waiter_init(&tw.w);
+  tw.next = NULL;
+  if (m->tail) m->tail->next = &tw;
+  else m->head = &tw;
+  m->tail = &tw;
+  pthread_mutex_unlock(&m->mu);
+  wait_for(&tw.w);
+}
+
+static void tunlock(tmutex *m) {
+  pthread_mutex_lock(&m->mu);
+  twait *n = m->head;
+  if (n) {
+    m->head = n->next;
+    if (!m->head) m->tail = NULL;
+    pthread_mutex_unlock(&m->mu);
+    wake(&n->w); // still locked: it's n's now
+    return;
+  }
+  m->locked = 0;
+  pthread_mutex_unlock(&m->mu);
+}
+
+// ---- sockets ----
+//
+// `net.Conn` and `net.Listener` are shared handles: a struct holding one
+// closure-like value whose environment is an ovt_sock, so copies share the
+// socket and it closes when the last copy goes. `close` shuts it down at once,
+// waking any task waiting on it; the fd itself is closed on the last drop.
+
+typedef struct {
+  int64_t rc;
+  ovt_fn1 drop;
+  ovt_fn1 mark;
+  int fd;
+  int closed; // changed atomically
+  int64_t timeout; // ns a read or write may wait, or 0
+  tmutex rmu, wmu;
+  char *rbuf; // bytes read but not yet returned
+  int64_t rstart, rlen, rcap;
+} ovt_sock;
+
+void ovt_mark_none(void *env);
+
+static void sock_free(void *p) {
+  ovt_sock *s = p;
+  close(s->fd);
+  pthread_mutex_destroy(&s->rmu.mu);
+  pthread_mutex_destroy(&s->wmu.mu);
+  free(s->rbuf);
+  free(s);
+}
+
+static ovt_sock *sock_new(int fd) {
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+  fcntl(fd, F_SETFD, FD_CLOEXEC);
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+  ovt_sock *s = ovt_alloc(sizeof(ovt_sock));
+  memset(s, 0, sizeof *s);
+  s->rc = 1;
+  s->drop = sock_free;
+  s->mark = ovt_mark_none;
+  s->fd = fd;
+  pthread_mutex_init(&s->rmu.mu, NULL);
+  pthread_mutex_init(&s->wmu.mu, NULL);
+  return s;
+}
+
+static void msg_str(ovt_str *err, const char *a, const ovt_str *b, const char *c) {
+  str_from(err, a, (int64_t)strlen(a));
+  if (b) ovt_str_append_bytes(err, sdata(b), b->len);
+  if (c) ovt_str_append_bytes(err, c, (int64_t)strlen(c));
+}
+
+// "<what> <addr>: <reason>".
+static int32_t net_fail(ovt_str *err, const char *what, const ovt_str *addr, int e) {
+  char reason[256];
+  strerror_r(e, reason, sizeof reason);
+  str_from(err, what, (int64_t)strlen(what));
+  if (addr) {
+    ovt_str_append_bytes(err, " ", 1);
+    ovt_str_append_bytes(err, sdata(addr), addr->len);
+  }
+  ovt_str_append_bytes(err, ": ", 2);
+  ovt_str_append_bytes(err, reason, (int64_t)strlen(reason));
+  switch (e) {
+  case EADDRINUSE: return K_CONFLICT + 1;
+  case EACCES: case EPERM: return K_DENIED + 1;
+  case ECONNREFUSED: case EHOSTUNREACH: case ENETUNREACH: case EMFILE: case ENFILE: return K_UNAVAILABLE + 1;
+  case ETIMEDOUT: return K_TIMEOUT + 1;
+  case EINVAL: return K_INVALID + 1;
+  default: return K_IO + 1;
+  }
+}
+
+static int32_t cancelled_fail(ovt_str *err) {
+  str_from(err, "cancelled", 9);
+  return K_CANCELLED + 1;
+}
+
+// Parses "host:port" or ":port" into an IPv4 address. Host names other than
+// "localhost" are looked up on the blocking pool.
+typedef struct {
+  char host[256];
+  const char *port;
+  struct sockaddr_in sa;
+  int ok;
+} resolve_job;
+
+static void run_resolve(void *a) {
+  resolve_job *j = a;
+  struct addrinfo hints, *res = NULL;
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  if (getaddrinfo(j->host, j->port, &hints, &res) == 0 && res) {
+    memcpy(&j->sa, res->ai_addr, sizeof j->sa);
+    j->ok = 1;
+  }
+  if (res) freeaddrinfo(res);
+}
+
+static int32_t parse_addr(const ovt_str *addr, int listening, struct sockaddr_in *sa, ovt_str *err) {
+  char buf[300];
+  if (addr->len >= (int64_t)sizeof buf) {
+    msg_str(err, "address too long: ", addr, NULL);
+    return K_INVALID + 1;
+  }
+  memcpy(buf, sdata(addr), (size_t)addr->len);
+  buf[addr->len] = 0;
+  char *colon = strrchr(buf, ':');
+  char *end = NULL;
+  long port = colon ? strtol(colon + 1, &end, 10) : -1;
+  if (!colon || !*(colon + 1) || *end || port < 0 || port > 65535) {
+    msg_str(err, "expected an address like \"127.0.0.1:8080\" or \":8080\", got \"", addr, "\"");
+    return K_INVALID + 1;
+  }
+  *colon = 0;
+  memset(sa, 0, sizeof *sa);
+  sa->sin_family = AF_INET;
+  sa->sin_port = htons((uint16_t)port);
+  if (!buf[0]) {
+    sa->sin_addr.s_addr = htonl(listening ? INADDR_ANY : INADDR_LOOPBACK);
+    return 0;
+  }
+  if (!strcmp(buf, "localhost")) {
+    sa->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    return 0;
+  }
+  if (inet_pton(AF_INET, buf, &sa->sin_addr) == 1) return 0;
+  resolve_job j;
+  memset(&j, 0, sizeof j);
+  snprintf(j.host, sizeof j.host, "%s", buf);
+  j.port = colon + 1;
+  blocking(run_resolve, &j);
+  if (!j.ok) {
+    msg_str(err, "can't find the address of ", addr, NULL);
+    return K_NOT_FOUND + 1;
+  }
+  *sa = j.sa;
+  sa->sin_port = htons((uint16_t)port);
+  return 0;
+}
+
+int32_t ovt_net_listen(const ovt_str *addr, void **out, ovt_str *err) {
+  if (task_cancelled()) return cancelled_fail(err);
+  struct sockaddr_in sa;
+  int32_t code = parse_addr(addr, 1, &sa, err);
+  if (code) return code;
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return net_fail(err, "can't listen on", addr, errno);
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0 || listen(fd, 4096) != 0) {
+    int e = errno;
+    close(fd);
+    return net_fail(err, "can't listen on", addr, e);
+  }
+  *out = sock_new(fd);
+  return 0;
+}
+
+int32_t ovt_net_accept(ovt_sock *l, void **out, ovt_str *err) {
+  for (;;) {
+    if (task_cancelled()) return cancelled_fail(err);
+    int fd = accept(l->fd, NULL, NULL);
+    if (fd >= 0) {
+      int one = 1;
+      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+      *out = sock_new(fd);
+      return 0;
+    }
+    int e = errno;
+    if (e == EINTR || e == ECONNABORTED) continue;
+    if (e == EAGAIN || e == EWOULDBLOCK) {
+      if (__atomic_load_n(&l->closed, __ATOMIC_ACQUIRE)) return net_fail(err, "can't accept: the listener is closed", NULL, EBADF);
+      if (wait_io(l->fd, EVFILT_READ, 0) == R_CANCELLED) return cancelled_fail(err);
+      continue;
+    }
+    return net_fail(err, "can't accept a connection", NULL, e);
+  }
+}
+
+int32_t ovt_net_connect(const ovt_str *addr, void **out, ovt_str *err) {
+  if (task_cancelled()) return cancelled_fail(err);
+  struct sockaddr_in sa;
+  int32_t code = parse_addr(addr, 0, &sa, err);
+  if (code) return code;
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return net_fail(err, "can't connect to", addr, errno);
+  ovt_sock *s = sock_new(fd);
+  if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+    int e = errno;
+    if (e == EINPROGRESS) {
+      if (wait_io(fd, EVFILT_WRITE, 0) == R_CANCELLED) {
+        sock_free(s);
+        return cancelled_fail(err);
+      }
+      socklen_t len = sizeof e;
+      getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &len);
+    }
+    if (e) {
+      sock_free(s);
+      return net_fail(err, "can't connect to", addr, e);
+    }
+  }
+  int one = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+  *out = s;
+  return 0;
+}
+
+static int64_t deadline_of(ovt_sock *s) { return s->timeout ? now_ns() + s->timeout : 0; }
+
+static int32_t timed_out(ovt_sock *s, ovt_str *err, const char *what) {
+  char m[128];
+  int n = snprintf(m, sizeof m, "%s: nothing happened for %lld ms", what, (long long)(s->timeout / 1000000));
+  str_from(err, m, n);
+  return K_TIMEOUT + 1;
+}
+
+// Reads more bytes into the buffer. Returns 1 when some arrived, 0 at the end
+// of the stream (or a reset), or an error code + 2.
+static int32_t fill(ovt_sock *s, ovt_str *err) {
+  int64_t deadline = deadline_of(s);
+  for (;;) {
+    if (s->rstart > 0 && s->rstart == s->rlen) s->rstart = s->rlen = 0;
+    if (s->rstart > 0 && s->rlen == s->rcap) {
+      memmove(s->rbuf, s->rbuf + s->rstart, (size_t)(s->rlen - s->rstart));
+      s->rlen -= s->rstart;
+      s->rstart = 0;
+    }
+    if (s->rlen == s->rcap) {
+      s->rcap = s->rcap ? s->rcap * 2 : 4096;
+      s->rbuf = realloc(s->rbuf, (size_t)s->rcap);
+      if (!s->rbuf) oom();
+    }
+    if (task_cancelled()) return cancelled_fail(err) + 2;
+    ssize_t n = read(s->fd, s->rbuf + s->rlen, (size_t)(s->rcap - s->rlen));
+    if (n > 0) {
+      s->rlen += n;
+      return 1;
+    }
+    if (n == 0) return 0;
+    int e = errno;
+    if (e == EINTR) continue;
+    if (e == ECONNRESET || e == ENOTCONN || e == EBADF) return 0;
+    if (e == EAGAIN || e == EWOULDBLOCK) {
+      // An idle connection holds no buffer while it waits.
+      if (s->rstart == s->rlen) {
+        free(s->rbuf);
+        s->rbuf = NULL;
+        s->rcap = s->rstart = s->rlen = 0;
+      }
+      int r = wait_io(s->fd, EVFILT_READ, deadline);
+      if (r == R_CANCELLED) return cancelled_fail(err) + 2;
+      if (r == R_TIMEOUT) return timed_out(s, err, "read") + 2;
+      continue;
+    }
+    return net_fail(err, "can't read from the connection", NULL, e) + 2;
+  }
+}
+
+enum { MAX_LINE = 1 << 20 };
+
+// The next line, without "\n" (and a "\r" before it), in `out`; `*got` is 0
+// at the end of the stream, where an unfinished line is dropped.
+int32_t ovt_net_read_line(ovt_sock *s, ovt_arr *out, int32_t text, int32_t *got, ovt_str *err) {
+  tlock(&s->rmu);
+  int32_t code = 0;
+  *got = 0;
+  int64_t scanned = 0;
+  for (;;) {
+    char *start = s->rbuf ? s->rbuf + s->rstart : NULL;
+    int64_t avail = s->rlen - s->rstart;
+    char *nl = avail > scanned ? memchr(start + scanned, '\n', (size_t)(avail - scanned)) : NULL;
+    if (nl) {
+      int64_t n = nl - start;
+      int64_t len = n > 0 && start[n - 1] == '\r' ? n - 1 : n;
+      out->buf = NULL;
+      out->off = 0;
+      out->len = 0;
+      if (text && !utf8_valid((const unsigned char *)start, len)) {
+        str_from(err, "the line isn't valid UTF-8; read it with read_line_bytes", 56);
+        code = K_INVALID + 1;
+      } else {
+        ovt_str_append_bytes(out, start, len);
+        *got = 1;
+      }
+      s->rstart += n + 1;
+      break;
+    }
+    scanned = avail;
+    if (avail > MAX_LINE) {
+      str_from(err, "the line is longer than 1 MiB", 29);
+      code = K_INVALID + 1;
+      break;
+    }
+    int32_t r = fill(s, err);
+    if (r == 0) break;
+    if (r >= 2) {
+      code = r - 2;
+      break;
+    }
+  }
+  tunlock(&s->rmu);
+  return code;
+}
+
+// Some bytes as they arrive; empty at the end of the stream.
+int32_t ovt_net_read(ovt_sock *s, ovt_arr *out, ovt_str *err) {
+  tlock(&s->rmu);
+  int32_t code = 0;
+  out->buf = NULL;
+  out->off = 0;
+  out->len = 0;
+  if (s->rlen == s->rstart) {
+    int32_t r = fill(s, err);
+    if (r >= 2) code = r - 2;
+  }
+  if (!code && s->rlen > s->rstart) {
+    ovt_str_append_bytes(out, s->rbuf + s->rstart, s->rlen - s->rstart);
+    s->rstart = s->rlen = 0;
+  }
+  tunlock(&s->rmu);
+  return code;
+}
+
+int32_t ovt_net_write(ovt_sock *s, const ovt_arr *data, ovt_str *err) {
+  tlock(&s->wmu);
+  int32_t code = 0;
+  const char *p = sdata(data);
+  int64_t left = data->len;
+  int64_t deadline = deadline_of(s);
+  while (left > 0) {
+    if (task_cancelled()) {
+      code = cancelled_fail(err);
+      break;
+    }
+    ssize_t n = write(s->fd, p, (size_t)left);
+    if (n > 0) {
+      p += n;
+      left -= n;
+      continue;
+    }
+    int e = errno;
+    if (e == EINTR) continue;
+    if (e == EAGAIN || e == EWOULDBLOCK) {
+      int r = wait_io(s->fd, EVFILT_WRITE, deadline);
+      if (r == R_CANCELLED) {
+        code = cancelled_fail(err);
+        break;
+      }
+      if (r == R_TIMEOUT) {
+        code = timed_out(s, err, "write");
+        break;
+      }
+      continue;
+    }
+    if (e == EPIPE || e == ECONNRESET || e == ENOTCONN || e == EBADF) {
+      str_from(err, "the connection is closed", 24);
+      code = K_IO + 1;
+    } else {
+      code = net_fail(err, "can't write to the connection", NULL, e);
+    }
+    break;
+  }
+  tunlock(&s->wmu);
+  return code;
+}
+
+void ovt_net_set_timeout(ovt_sock *s, int64_t ns) { s->timeout = ns > 0 ? ns : 0; }
+
+void ovt_net_close(ovt_sock *s) {
+  if (!__atomic_exchange_n(&s->closed, 1, __ATOMIC_ACQ_REL)) shutdown(s->fd, SHUT_RDWR);
+}
+
+void ovt_net_peer(ovt_sock *s, ovt_str *out) {
+  struct sockaddr_in sa;
+  socklen_t len = sizeof sa;
+  char ip[INET_ADDRSTRLEN] = "?";
+  char m[64];
+  int port = 0;
+  if (getpeername(s->fd, (struct sockaddr *)&sa, &len) == 0) {
+    inet_ntop(AF_INET, &sa.sin_addr, ip, sizeof ip);
+    port = ntohs(sa.sin_port);
+  }
+  int n = snprintf(m, sizeof m, "%s:%d", ip, port);
+  str_from(out, m, n);
+}
+
+int64_t ovt_net_port(ovt_sock *s) {
+  struct sockaddr_in sa;
+  socklen_t len = sizeof sa;
+  if (getsockname(s->fd, (struct sockaddr *)&sa, &len) != 0) return 0;
+  return ntohs(sa.sin_port);
+}
+
+// ---- time ----
+
+// Waits `ns`; returns early if the task is cancelled.
+void ovt_time_sleep(int64_t ns) {
+  if (ns <= 0) return;
+  wait_io(-1, 0, now_ns() + ns);
+}
+
+static int64_t start_ns;
+
+int64_t ovt_time_monotonic(void) { return now_ns() - start_ns; }
+
+// ---- channels ----
+//
+// `Chan[T]` is a shared handle whose environment is an ovt_chan: a bounded
+// ring buffer of values, with queues of parked senders and receivers. A value
+// is moved in by `send` and out by `recv`; codegen marks it shared first.
+
+typedef struct cwait {
+  ovt_waiter w;
+  void *slot; // a sender's value, or where a receiver wants it
+  int ok;
+  struct cwait *next;
+} cwait;
+
+typedef struct {
+  int64_t rc;
+  ovt_fn1 drop;
+  ovt_fn1 mark;
+  pthread_mutex_t mu;
+  int64_t esize;
+  ovt_fn1 edrop;
+  char *buf; // a ring of `alloc` slots, which grows up to `cap`
+  int64_t cap, alloc, head, len;
+  int closed;
+  cwait *snd_head, *snd_tail, *rcv_head, *rcv_tail;
+} ovt_chan;
+
+// Makes room for one more value; the caller has checked len < cap.
+static void chan_grow(ovt_chan *c) {
+  if (c->len < c->alloc) return;
+  int64_t n = c->alloc ? c->alloc * 2 : 8;
+  if (n > c->cap) n = c->cap;
+  char *nb = ovt_alloc(n * (c->esize > 0 ? c->esize : 1));
+  for (int64_t i = 0; i < c->len; i++) memcpy(nb + i * c->esize, c->buf + ((c->head + i) % c->alloc) * c->esize, (size_t)c->esize);
+  free(c->buf);
+  c->buf = nb;
+  c->alloc = n;
+  c->head = 0;
+}
+
+static void chan_free(void *p) {
+  ovt_chan *c = p;
+  if (c->edrop)
+    for (int64_t i = 0; i < c->len; i++) c->edrop(c->buf + ((c->head + i) % c->alloc) * c->esize);
+  pthread_mutex_destroy(&c->mu);
+  free(c->buf);
+  free(c);
+}
+
+void *ovt_chan_new(int64_t cap, int64_t esize, ovt_fn1 edrop) {
+  if (cap < 1) cap = 1;
+  ovt_chan *c = ovt_alloc(sizeof(ovt_chan));
+  memset(c, 0, sizeof *c);
+  c->rc = 1;
+  c->drop = chan_free;
+  c->mark = ovt_mark_none;
+  pthread_mutex_init(&c->mu, NULL);
+  c->esize = esize;
+  c->edrop = edrop;
+  c->cap = cap;
+  return c;
+}
+
+static void cq_push(cwait **head, cwait **tail, cwait *w) {
+  w->next = NULL;
+  if (*tail) (*tail)->next = w;
+  else *head = w;
+  *tail = w;
+}
+
+static cwait *cq_pop(cwait **head, cwait **tail) {
+  cwait *w = *head;
+  if (w) {
+    *head = w->next;
+    if (!*head) *tail = NULL;
+  }
+  return w;
+}
+
+// Moves the value at `v` into the channel, waiting while it's full. On
+// failure (closed, or cancelled) the value is dropped.
+int32_t ovt_chan_send(ovt_chan *c, void *v, ovt_str *err) {
+  if (task_cancelled()) {
+    if (c->edrop) c->edrop(v);
+    return cancelled_fail(err);
+  }
+  pthread_mutex_lock(&c->mu);
+  if (!c->closed) {
+    cwait *r = cq_pop(&c->rcv_head, &c->rcv_tail);
+    if (r) {
+      memcpy(r->slot, v, (size_t)c->esize);
+      r->ok = 1;
+      pthread_mutex_unlock(&c->mu);
+      wake(&r->w);
+      return 0;
+    }
+    if (c->len < c->cap) {
+      chan_grow(c);
+      memcpy(c->buf + ((c->head + c->len) % c->alloc) * c->esize, v, (size_t)c->esize);
+      c->len++;
+      pthread_mutex_unlock(&c->mu);
+      return 0;
+    }
+    cwait me;
+    waiter_init(&me.w);
+    me.slot = v;
+    me.ok = 0;
+    cq_push(&c->snd_head, &c->snd_tail, &me);
+    pthread_mutex_unlock(&c->mu);
+    wait_for(&me.w);
+    if (me.ok) return 0;
+  } else {
+    pthread_mutex_unlock(&c->mu);
+  }
+  if (c->edrop) c->edrop(v);
+  str_from(err, "the channel is closed", 21);
+  return K_UNAVAILABLE + 1;
+}
+
+// Moves the next value into `out` and returns 1, waiting while the channel is
+// empty; returns 0 once it's closed and empty.
+int32_t ovt_chan_recv(ovt_chan *c, void *out) {
+  pthread_mutex_lock(&c->mu);
+  if (c->len > 0) {
+    memcpy(out, c->buf + c->head * c->esize, (size_t)c->esize);
+    c->head = (c->head + 1) % c->alloc;
+    c->len--;
+    cwait *s = cq_pop(&c->snd_head, &c->snd_tail);
+    if (s) {
+      memcpy(c->buf + ((c->head + c->len) % c->alloc) * c->esize, s->slot, (size_t)c->esize);
+      c->len++;
+      s->ok = 1;
+    }
+    pthread_mutex_unlock(&c->mu);
+    if (s) wake(&s->w);
+    return 1;
+  }
+  if (c->closed) {
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  cwait me;
+  waiter_init(&me.w);
+  me.slot = out;
+  me.ok = 0;
+  cq_push(&c->rcv_head, &c->rcv_tail, &me);
+  pthread_mutex_unlock(&c->mu);
+  wait_for(&me.w);
+  return me.ok;
+}
+
+// Closes the channel: waiting receivers get `none`, and senders fail.
+void ovt_chan_close(ovt_chan *c) {
+  pthread_mutex_lock(&c->mu);
+  c->closed = 1;
+  cwait *rs = c->rcv_head, *ss = c->snd_head;
+  c->rcv_head = c->rcv_tail = c->snd_head = c->snd_tail = NULL;
+  pthread_mutex_unlock(&c->mu);
+  while (rs) {
+    cwait *n = rs->next;
+    wake(&rs->w);
+    rs = n;
+  }
+  while (ss) {
+    cwait *n = ss->next;
+    wake(&ss->w);
+    ss = n;
+  }
+}
+
+int64_t ovt_chan_len(ovt_chan *c) {
+  pthread_mutex_lock(&c->mu);
+  int64_t n = c->len;
+  pthread_mutex_unlock(&c->mu);
+  return n;
+}
+
+// ---- Shared ----
+//
+// `Shared[T]` is a shared handle whose environment is an ovt_shared holding
+// the value. `lock s as v { ... }` takes a task lock (a waiting task parks,
+// and the holder may move between threads), and unlocking marks everything
+// the value reaches shared again, since the block may have put new values
+// into it or copied values out of it.
+
+typedef struct {
+  int64_t rc;
+  ovt_fn1 drop;
+  ovt_fn1 mark;
+  tmutex mu;
+  ovt_task *owner; // changed atomically
+  ovt_fn1 vdrop, vmark;
+  _Alignas(16) char value[];
+} ovt_shared;
+
+static void shared_free(void *p) {
+  ovt_shared *s = p;
+  if (s->vdrop) s->vdrop(s->value);
+  pthread_mutex_destroy(&s->mu.mu);
+  free(s);
+}
+
+void *ovt_shared_new(int64_t size, ovt_fn1 vdrop, ovt_fn1 vmark) {
+  ovt_shared *s = ovt_alloc((int64_t)sizeof(ovt_shared) + (size > 0 ? size : 1));
+  memset(s, 0, sizeof *s);
+  s->rc = 1;
+  s->drop = shared_free;
+  s->mark = ovt_mark_none;
+  pthread_mutex_init(&s->mu.mu, NULL);
+  s->vdrop = vdrop;
+  s->vmark = vmark;
+  return s;
+}
+
+void *ovt_shared_value(ovt_shared *s) { return s->value; }
+
+void ovt_shared_lock(ovt_shared *s, const char *file, int32_t line, int32_t col) {
+  ovt_task *t = cur_task();
+  if (t && __atomic_load_n(&s->owner, __ATOMIC_ACQUIRE) == t) {
+    static const char m[] = "this task already holds this lock";
+    ovt_trap(m, sizeof m - 1, file, line, col);
+  }
+  tlock(&s->mu);
+  __atomic_store_n(&s->owner, t, __ATOMIC_RELEASE);
+}
+
+void ovt_shared_unlock(ovt_shared *s) {
+  if (s->vmark) s->vmark(s->value);
+  __atomic_store_n(&s->owner, NULL, __ATOMIC_RELEASE);
+  tunlock(&s->mu);
+}
+
+// ---- task groups ----
+//
+// `task.group(|g| ...)` runs the body in the calling task; `g.spawn(f)`
+// starts a task running the closure `f`. The group waits for all of them.
+// If the body fails, the group's scope is cancelled first, so the spawned
+// tasks stop at their next io call.
+
+typedef struct {
+  int64_t rc;
+  ovt_fn1 drop;
+  ovt_fn1 mark;
+  int64_t pending; // spawned tasks running, plus one for the body; atomic
+  ovt_waiter done;
+  ovt_cancel *scope;
+  int finished;
+} ovt_tgroup;
+
+static void tgroup_free(void *p) {
+  ovt_tgroup *g = p;
+  cancel_unref(g->scope);
+  free(g);
+}
+
+void *ovt_group_new(void) {
+  ovt_tgroup *g = ovt_alloc(sizeof(ovt_tgroup));
+  memset(g, 0, sizeof *g);
+  g->rc = 1;
+  g->drop = tgroup_free;
+  g->mark = ovt_mark_none;
+  g->pending = 1;
+  waiter_init(&g->done);
+  ovt_task *t = cur_task();
+  g->scope = cancel_new(t ? t->cancel : NULL);
+  return g;
+}
+
+typedef struct {
+  void (*fn)(void *);
+  void *env;
+  ovt_tgroup *g;
+} spawn_arg;
+
+void ovt_env_release(int64_t *env);
+
+static int32_t spawned_main(void *a) {
+  spawn_arg sa = *(spawn_arg *)a;
+  free(a);
+  sa.fn(sa.env);
+  ovt_env_release(sa.env);
+  // The group outlives this: task.group holds it until everything is done.
+  if (__atomic_sub_fetch(&sa.g->pending, 1, __ATOMIC_ACQ_REL) == 0) wake(&sa.g->done);
+  return 0;
+}
+
+// Starts a task running the closure {fn, env}; takes over a reference to env.
+void ovt_group_spawn(ovt_tgroup *g, void (*fn)(void *), void *env, const char *file, int32_t line, int32_t col) {
+  if (__atomic_load_n(&g->finished, __ATOMIC_ACQUIRE)) {
+    static const char m[] = "this task group has already finished";
+    ovt_trap(m, sizeof m - 1, file, line, col);
+  }
+  __atomic_add_fetch(&g->pending, 1, __ATOMIC_ACQ_REL);
+  spawn_arg *a = ovt_alloc(sizeof(spawn_arg));
+  a->fn = fn;
+  a->env = env;
+  a->g = g;
+  pthread_once(&workers_once, start_workers);
+  make_runnable(task_new(spawned_main, a, STACK_SIZE, NULL, g->scope));
+}
+
+void ovt_group_wait(ovt_tgroup *g, int32_t body_failed) {
+  if (body_failed) cancel_scope(g->scope);
+  if (__atomic_sub_fetch(&g->pending, 1, __ATOMIC_ACQ_REL) > 0) wait_for(&g->done);
+  __atomic_store_n(&g->finished, 1, __ATOMIC_RELEASE);
+}
+
+// ---- task.timeout ----
+
+typedef struct {
+  int32_t (*body)(void *);
+  void *ctx;
+  int32_t result;
+  ovt_waiter done;
+} timeout_arg;
+
+static int32_t timeout_main(void *p) {
+  timeout_arg *a = p;
+  a->result = a->body(a->ctx);
+  wake(&a->done);
+  return 0;
+}
+
+// Runs body(ctx) in a child task, in a scope that's cancelled after `ns`.
+// Returns 0 if it succeeded, 1 if it failed, and 2 if the deadline passed
+// first, whatever the body did after being cancelled.
+int32_t ovt_timeout(int64_t ns, int32_t (*body)(void *), void *ctx) {
+  ovt_task *self = cur_task();
+  ovt_cancel *scope = cancel_new(self ? self->cancel : NULL);
+  timeout_arg a;
+  a.body = body;
+  a.ctx = ctx;
+  a.result = 0;
+  waiter_init(&a.done);
+  preq *r = ovt_alloc(sizeof(preq));
+  memset(r, 0, sizeof *r);
+  r->fd = -1;
+  r->deadline = now_ns() + (ns > 0 ? ns : 0);
+  r->heap_at = -1;
+  r->expire = scope;
+  cancel_ref(scope);
+  submit(M_EXPIRE, r, NULL);
+  pthread_once(&workers_once, start_workers);
+  make_runnable(task_new(timeout_main, &a, STACK_SIZE, NULL, scope));
+  wait_for(&a.done);
+  cancel_ref(scope);
+  submit(M_UNEXPIRE, NULL, scope);
+  int32_t res = __atomic_load_n(&scope->timed_out, __ATOMIC_ACQUIRE) ? 2 : a.result == 0 ? 0 : 1;
+  cancel_unref(scope);
+  return res;
+}
+
 // ---- stack overflow ----
 
 static void on_fault(int sig, siginfo_t *info, void *uc) {
@@ -1314,7 +2517,11 @@ int32_t ovt_rt_run(int32_t (*fn)(void)) {
   w->stack_bottom = (char *)pthread_get_stackaddr_np(self) - size;
   w->stack_size = size;
 #endif
-  main_task = task_new((int32_t(*)(void *))fn, NULL, MAIN_STACK_SIZE, NULL);
+  start_ns = now_ns();
+  // Writing to a closed socket fails with EPIPE instead of killing the process.
+  signal(SIGPIPE, SIG_IGN);
+  raise_file_limit();
+  main_task = task_new((int32_t(*)(void *))fn, NULL, MAIN_STACK_SIZE, NULL, NULL);
   push_local(w, main_task);
   worker_loop(w);
   return main_task->result;
@@ -1630,18 +2837,21 @@ static void run_list(void *a) {
 }
 
 int32_t ovt_fs_read(const ovt_str *path, ovt_arr *out, int32_t want_text, ovt_str *err) {
+  if (task_cancelled()) return cancelled_fail(err);
   fs_job j = {path, NULL, out, err, want_text, 0};
   blocking(run_read, &j);
   return j.result;
 }
 
 int32_t ovt_read_stdin(ovt_arr *out, int32_t want_text, ovt_str *err) {
+  if (task_cancelled()) return cancelled_fail(err);
   fs_job j = {NULL, NULL, out, err, want_text, 0};
   blocking(run_stdin, &j);
   return j.result;
 }
 
 int32_t ovt_fs_write(const ovt_str *path, const ovt_str *data, ovt_str *err) {
+  if (task_cancelled()) return cancelled_fail(err);
   fs_job j = {path, data, NULL, err, 0, 0};
   blocking(run_write, &j);
   return j.result;
@@ -1658,6 +2868,7 @@ int32_t ovt_fs_list(const ovt_str *path, int32_t deep, ovt_arr *out, ovt_str *er
   out->buf = NULL;
   out->off = 0;
   out->len = 0;
+  if (task_cancelled()) return cancelled_fail(err);
   fs_job j = {path, NULL, out, err, deep, 0};
   blocking(run_list, &j);
   return j.result;

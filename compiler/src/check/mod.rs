@@ -187,11 +187,11 @@ pub fn to_pascal(name: &str) -> String {
 }
 
 /// Functions from the spec that this compiler doesn't implement yet: (module, name, milestone).
-pub const LATER_FNS: &[(&str, &str, &str)] = &[("task", "group", "3"), ("task", "timeout", "3")];
+pub const LATER_FNS: &[(&str, &str, &str)] = &[];
 
 /// Types from the spec that this compiler doesn't implement yet.
 pub const LATER_TYPES: &[(&str, &str)] =
-    &[("Shared", "3"), ("Chan", "3"), ("never", "1")];
+    &[("never", "1")];
 
 impl<'a> Checker<'a> {
     pub fn err(&mut self, file: FileId, span: Span, msg: impl Into<String>) {
@@ -273,6 +273,8 @@ impl<'a> Checker<'a> {
         self.known.err_kind = get(self, "ErrKind");
         self.known.map = get(self, "Map");
         self.known.set = get(self, "Set");
+        self.known.chan = get(self, "Chan");
+        self.known.shared = get(self, "Shared");
     }
 
     fn find_known_fns(&mut self) {
@@ -284,6 +286,7 @@ impl<'a> Checker<'a> {
         self.known.set_insert = m(self, self.known.set, "insert");
         self.known.map_equals = m(self, self.known.map, "equals");
         self.known.set_equals = m(self, self.known.set, "equals");
+        self.known.chan_recv = m(self, self.known.chan, "recv");
     }
 
     pub fn generic_defs(&mut self, gs: &[GenericParam], file: FileId, outer: &[GenericDef]) -> Vec<GenericDef> {
@@ -563,7 +566,7 @@ impl<'a> Checker<'a> {
                 Ty::Error
             }
             None if stdlib::MODULE_NAMES.contains(&module.as_str()) => {
-                self.err(file, span, format!("the `{module}` module isn't available in this compiler yet"));
+                self.err(file, span, format!("the `{module}` module isn't available in this compiler yet (planned for milestone {})", stdlib::planned_milestone(&module)));
                 Ty::Error
             }
             None => {

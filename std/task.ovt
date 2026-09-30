@@ -5,3 +5,17 @@
 // order. Stops at the first failure.
 fn map[T, U, !E](xs: [T], f: fn(T) -> U ! E) -> [U] ! E
   ex task.map([1, 2, 3], |x| x * 2) == [2, 4, 6]
+
+// Runs `body`, which starts tasks with `g.spawn`, and returns once they have
+// all finished. If `body` fails, the tasks it started are cancelled first.
+fn group[!E](body: fn(Group) ! E) ! E
+
+// The tasks of a `task.group`.
+type Group { _cell: fn() -> int }
+
+// Starts a task that runs `f`. The task can't fail; it handles its own errors.
+fn Group.spawn(self, f: fn() ! io) ! io
+
+// Runs `f` in a task of its own, and fails with `.Timeout` if it takes longer
+// than `d`. `f` is cancelled then: its next `io` call fails with `.Cancelled`.
+fn timeout[T, !E](d: Dur, f: fn() -> T ! E) -> T ! E, fail

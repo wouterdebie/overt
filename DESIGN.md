@@ -8,7 +8,7 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 
 ## Principles
 
-1. **Learnable from the spec alone.** No model has training data for Overt, so SPEC.md is everything it knows. The hard cap is **5,000 tokens**, measured with `o200k_base` as a proxy (see the end of this file). A feature has to be worth the tokens it adds to the spec.
+1. **Learnable from the spec alone.** No model has training data for Overt, so SPEC.md and the std outline are everything it knows. The budgets are **6,000 tokens** for SPEC.md and **12,000** for SPEC.md plus the std outline, measured with `o200k_base` as a proxy (see the end of this file). A feature has to be worth the tokens it adds.
 2. **Read less, fail less, fail cheaply.** Most agent tokens go to reading code and output and to retrying after errors, not to writing code. Outlines, locality and precise errors matter more than terse syntax.
 3. **Familiar surface.** C-family, ASCII, braces, keywords an agent would guess anyway. Where Overt differs from Rust or TypeScript habits, the spec lists the difference in its last table.
 4. **Explicit and local.** Every name resolves to exactly one declaration, which one grep finds. A function's signature says everything a caller needs to know.
@@ -44,6 +44,8 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 | `!` on an integer flips its bits | Hashing needs bitwise NOT (SHA-256's choose function), and agents coming from Rust write `!x` | `~x` (one more operator); no NOT at all (`x ^ 0xffffffff`) |
 | `Atomic` operations are `! io` | Another task can change the value, so a function that reads one isn't pure | Pure atomics |
 | `fs.walk` and `fs.list` return entries sorted by path | Deterministic output, and a listing like `hashdir`'s needs no sort | Directory order |
+| `net.Conn` is a shared handle | A chat server has one task reading a connection and another writing it; a move-only connection would need Rust-style split halves. Resources with `drop` arrive with C interop (milestone 5) | A move-only resource |
+| `Dur` scales by `int` (`n * 1s`, `d / 2`) | A timeout often comes from a number, like a command-line argument | Functions like `time.seconds(n)` |
 
 ## Memory model
 
@@ -59,8 +61,7 @@ A coding agent working in Overt, with only SPEC.md and the toolchain, should bui
 | `?T` | `{i1 some, T}`; niche optimization comes later |
 | closure | `{fn: ptr, env: ptr}`. The environment is `{rc: i64, drop: ptr, mark: ptr, captures...}` holding copies of the captured values; `drop` frees it and `mark` marks the captures shared, so neither needs the closure's type. Named functions used as values get a thunk and a null environment |
 | resource | planned (milestone 5): plain layout plus a drop function; move-only |
-| `Atomic` | a std struct holding one closure-like value whose environment is `{rc, drop, mark, value}`, so copies share the value and it gets counting and marking for free |
-| `Shared[T]`, `Chan` | planned (milestone 3): a pointer to a box with an always-atomic count. `Shared` holds `{rc, lock, owner_task, T}` |
+| shared handles: `Atomic`, `Shared[T]`, `Chan[T]`, `net.Conn`, `net.Listener`, `task.Group` | a std struct holding one closure-like value, `{fn: null, env}`, whose environment is a runtime object that starts with the environment header `{rc, drop, mark}`. Copies share the object, which gets counting and marking the way closures do, and is freed with the last copy |
 
 ### Copy, move, drop
 
@@ -132,7 +133,7 @@ Data that becomes reachable from more than one task is marked *shared* by negati
 
 ## Concurrency runtime
 
-The runtime is C, in `runtime/rt.c`, compiled with every program. Milestone 2 built tasks, workers, `par`, `task.map`, `Atomic` and the blocking pool. Networking, timers, cancellation, `Shared` and `Chan` come in milestone 3.
+The runtime is C, in `runtime/rt.c`, compiled with every program. Milestone 2 built tasks, workers, `par`, `task.map`, `Atomic` and the blocking pool; milestone 3 added the poller, sockets, timers, cancellation, `Shared`, `Chan`, `task.group` and `task.timeout`.
 
 - **Tasks.** `main` is the first task, and every Overt function runs in one. Tasks are stackful coroutines, so a borrowed pointer stays valid across a wait, which avoids the whole class of Rust `Pin` and self-referential future problems.
 - **Workers.** One OS thread per core; `OVT_WORKERS` overrides the count.
@@ -155,16 +156,36 @@ The runtime is C, in `runtime/rt.c`, compiled with every program. Milestone 2 bu
 - **Structured scopes.** `ovt_parallel(n, body, ctx)` runs `body(ctx, i)` for every index, and `task.map` and `par` compile to it.
   - The work runs on up to one task per worker, including the calling task. Indexes are handed out one at a time.
   - After a failure, no new index starts, and the error of the lowest failing index is passed on. Indexes are handed out in order and a started body finishes, so that choice is deterministic.
-  - The other results are dropped. Bodies already running finish, since there's no cancellation yet.
+  - The other results are dropped. Bodies already running are cancelled: their next `io` call fails.
 - **Blocking pool.** File IO runs on up to 64 extra threads while the task waits, so a worker never sits in the kernel. With only one task alive there's nothing else to run, so the call runs inline instead.
 - **`Atomic[int]`.** `load`, `store` and `add` are sequentially consistent atomic operations on the number.
 - **Sanitizers.** Context switches are annotated for ThreadSanitizer (fibers) and AddressSanitizer (stack switching), and a stack is unpoisoned before reuse. `OVT_CFLAGS="-fsanitize=thread -g"` builds a program with ThreadSanitizer.
-- **Planned for milestone 3:**
-  - **IO.** kqueue on macOS first; later epoll and then io_uring on Linux. Sockets are non-blocking. A task waiting on IO registers interest and parks.
-  - **Timers.** A timer heap per worker, used by `time.sleep` and `task.timeout`.
-  - **Cancellation.** Each task has a flag, and cancellation propagates down the task tree. The flag is checked at every suspension point and on entry to every `io` call, which then fails with `.Cancelled`. Fail-fast scopes then cancel the bodies that are still running.
-  - **`Shared[T]`.** Lock blocks can't do `io`, so critical sections are short. v0 uses `os_unfair_lock` (a pthread mutex on Linux), which blocks the worker thread for the duration. A task relocking a `Shared` it already holds traps.
-  - **`Chan[T]`.** A bounded ring buffer with queues of parked senders and receivers.
+- **The poller.** One thread runs kqueue for every task waiting on a socket or a timer.
+  - A waiting task hands it a request and parks on a waiter in its own frame. The poller wakes it once, with ready, timed out or cancelled.
+  - Requests belong to the poller from then on, and only its thread touches them, so an fd event, a deadline and a cancellation can't both wake a task.
+  - Timers are a heap in the poller, which uses the nearest deadline as kqueue's timeout. `time.sleep`, read and write timeouts and `task.timeout` all use it.
+  - Epoll and io_uring on Linux come later.
+- **Cancellation.** Every task is in a cancel scope, and cancelling a scope cancels the scopes below it.
+  - A cancelled task's next failing `io` call fails with `.Cancelled`. A task parked on the poller is woken to fail, since the poller wakes every waiting request in a cancelled scope.
+  - `task.timeout` runs its function in a child task in a new scope, with a deadline that cancels it. It fails with `.Timeout` once the deadline has passed, whatever the child did afterwards.
+  - `task.group` cancels its tasks if its body fails. `par` and `task.map` cancel the others after the first failure.
+  - Not yet: a task waiting in `Chan.recv` or for a task lock isn't woken by cancellation, and a task that never calls `io` can't be cancelled at all.
+- **Sockets.** Non-blocking, with `SO_NOSIGPIPE`, and `SIGPIPE` ignored.
+  - Each connection has a read buffer for `read_line`, allocated when a read needs one and freed while the connection waits with nothing buffered. That's what keeps idle connections small.
+  - Reads and writes each hold a task lock, so lines written by several tasks don't interleave.
+  - `close` shuts the socket down at once, which wakes waiting tasks. The fd is closed with the last copy of the handle, since closing it while the poller watches it would leave a task waiting forever.
+  - The runtime raises the open-file limit to the maximum at startup.
+- **Task locks.** When a task waits for the lock, it parks instead of blocking its worker thread, and unlocking hands the lock to the next waiter in order. The holder may move between threads while it waits inside the lock, which rules out `os_unfair_lock` and pthread mutexes: they must be unlocked by the thread that locked them.
+- **`Shared[T]`.**
+  - `lock` takes the value's task lock, and traps if the task already holds it.
+  - The checker rejects `io`, failures passing out, `return`, and `break` or `continue` out of the block, so the block always ends by unlocking.
+  - Unlocking marks everything the value reaches shared again, since the block may have put new values into it or copied values out. The walk stops at counts that are already shared, so it costs about the part of the value that changed.
+- **`Chan[T]`.** A ring buffer that grows as needed up to its capacity, with queues of parked senders and receivers. A value is moved in by `send`, which marks it shared first, and out by `recv`. Closing wakes everyone: receivers get what's left and then `none`, and senders fail with `.Unavailable`.
+- **`task.group`.** The body runs in the calling task, and `g.spawn` starts a task running a closure. Its environment is marked shared, and the task holds a reference to it. The group waits for all of them.
+- **Measured on `chat`** (milestone 3's reference server, two tasks per client):
+  - 34 KiB of memory per idle connection. That's one 16 KiB stack page each for the session and writer tasks, plus a little heap.
+  - Before read buffers were freed while idle and channel buffers grew on demand, an idle connection took 120 KiB: every `Chan[str].new(10_000)` allocated its whole ring.
+  - Message latency to a 100-client room: p50 0.85 ms, p99 3.5 ms. A single-threaded Python asyncio server gets p50 0.64 ms and p99 1.0 ms: each message here wakes 99 writer tasks across worker threads, through run queues and sometimes a sleeping worker.
 - **Blocking C calls (milestone 5).** `blocking` extern calls run on the blocking pool while the task parks. Non-blocking extern calls run on the task stack, so heavy C work should be marked `blocking`.
 
 ## C interop
@@ -357,8 +378,9 @@ The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone l
 
 ## Open questions
 
-- Cancelling fail-fast bodies that are already running, once milestone 3 has cancellation.
 - Chase-Lev deques instead of mutex run queues, if the mutexes show up in profiles.
+- Lower wake-up latency: poll from idle workers instead of a separate poller thread, and spin briefly before sleeping.
+- Cancelling a task that waits in `Chan.recv` or for a task lock.
 - Why do agents think two to three times as much when writing Overt, and does the spec's shape (more examples, fewer rules) change that?
 
 - Should a trap stop only its task? That needs unwinding and a policy for poisoned locks.
@@ -384,10 +406,19 @@ The milestones in [ROADMAP.md](ROADMAP.md) set the build order. Each milestone l
 uvx --with tiktoken python -c "import tiktoken; e = tiktoken.get_encoding('o200k_base'); print(len(e.encode(open('SPEC.md').read())))"
 ```
 
-`o200k_base` is a proxy, since Claude's tokenizer isn't available offline. Treat the number as relative: SPEC.md must stay under 5,000 by this measure. After milestone 1 it's about 4,950.
+`o200k_base` is a proxy, since Claude's tokenizer isn't available offline. Treat the number as relative. After milestone 3, SPEC.md is 4,987 tokens by this measure.
 
-Agents also get the outline of every std module in their prompt (see the benchmark findings), so its size counts too. It has no cap yet. After milestone 1 it's about 3,200 by the same measure:
+Agents also get the outline of every std module in their prompt (see the benchmark findings), so its size counts too: about 3,200 tokens after milestone 1, and about 4,900 after milestone 3.
+
+`cargo test` (`docs_fit_their_budgets`) checks SPEC.md against 6,000 and SPEC.md plus the outline against 12,000, with tiktoken through `uvx`, or an estimate that errs high without it.
+
+**Why these budgets.** The first cap was 5,000 tokens for SPEC.md alone, a judgment call made before any benchmark ran. It kept the always-loaded document small and forced the language to stay small. Raised after milestone 3, for three reasons:
+- **The cap measured only part of what agents get.** They get the outline too, and it had no budget.
+- **Tokens of docs are cheap.** A fresh session writes them to the cache once, about $0.01 per 1,000 tokens at these runs' prices, and rereads cost little.
+- **Rules cost more than tokens.** On `jsonfmt`, Overt agents spent two to three times as many tokens thinking as Rust agents, which cost more than carrying the docs. So a feature is judged by what it costs to reason about, and the cap stays as a check against drift.
+
+The outline is made like this:
 
 ```
-for m in prelude array collections fs log math numbers os str; do ovt outline $m; echo; done | uvx --with tiktoken python -c "import sys, tiktoken; print(len(tiktoken.get_encoding('o200k_base').encode(sys.stdin.read())))"
+for f in std/*.ovt; do ovt outline $(basename $f .ovt); echo; done | uvx --with tiktoken python -c "import sys, tiktoken; print(len(tiktoken.get_encoding('o200k_base').encode(sys.stdin.read())))"
 ```

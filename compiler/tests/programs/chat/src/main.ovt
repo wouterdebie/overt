@@ -1,0 +1,203 @@
+// chat <port> <idle-seconds>: a line-based chat server with nicknames and rooms.
+//
+// Each client has a session task that reads its commands, and a writer task
+// that sends the client's queue to its socket, so a client that stops reading
+// holds up nobody but itself.
+
+type Client { nick: str, room: str, out: Chan[str], conn: net.Conn }
+
+type State { clients: Map[int, Client] }
+
+// How many lines may wait for one client. A client whose queue is nearly
+// full has stopped reading, and is disconnected.
+const QUEUE: int = 10_000
+
+fn main() ! io, fail {
+  let args = os.args()
+  if args.len() != 2 {
+    fail(.Invalid, "usage: chat <port> <idle-seconds>")
+  }
+  let port = int.parse(args[0]) else fail(.Invalid, "the port must be a number")
+  if port < 1 || port > 65535 {
+    fail(.Invalid, "the port must be from 1 to 65535")
+  }
+  let idle = int.parse(args[1]) else fail(.Invalid, "idle-seconds must be a number")
+  if idle < 1 {
+    fail(.Invalid, "idle-seconds must be at least 1")
+  }
+  let listener = net.listen("127.0.0.1:${port}")?
+  let state = Shared.new(State(clients: {}))
+  task.group(|g| {
+    var next = 0
+    while true {
+      let conn = listener.accept()?
+      let id = next
+      next += 1
+      g.spawn(|| session(state, conn, id, idle * 1s))
+    }
+  })?
+}
+
+fn session(state: Shared[State], conn: net.Conn, id: int, idle: Dur) ! io {
+  let out = Chan[str].new(QUEUE)
+  lock state as s {
+    s.clients[id] = Client(nick: "", room: "lobby", out, conn)
+  }
+  conn.set_timeout(idle)
+  task.group(|g| {
+    g.spawn(|| send_all(conn, out))
+    serve(state, conn, id) catch e {}
+    leave(state, id)
+    out.close()
+    conn.close()
+  })
+}
+
+fn send_all(conn: net.Conn, out: Chan[str]) ! io {
+  for line in out {
+    conn.write(line + "\n") catch e {
+      conn.close()
+      return
+    }
+  }
+}
+
+// Handles lines until the client quits, disconnects or is idle too long.
+fn serve(state: Shared[State], conn: net.Conn, id: int) ! io, fail {
+  while let line = conn.read_line()? {
+    if line == "/quit" {
+      return
+    }
+    handle(state, id, line)
+  }
+}
+
+fn handle(state: Shared[State], id: int, line: str) ! io {
+  if line.is_empty() {
+    return
+  }
+  if !line.starts_with("/") {
+    say(state, id, line)
+    return
+  }
+  let (cmd, arg) = split_command(line)
+  match cmd {
+    "/nick" => set_nick(state, id, arg)
+    "/join" => join(state, id, arg)
+    _ => reply(state, id, "error: unknown command")
+  }
+}
+
+// "/join dev" is ("/join", "dev").
+fn split_command(line: str) -> (str, str)
+  ex split_command("/join dev") == ("/join", "dev")
+  ex split_command("/quit") == ("/quit", "")
+{
+  let i = line.find(" ") else return (line, "")
+  return (line[..i], line[i + 1..])
+}
+
+// Nicknames and rooms: 1 to 16 ASCII letters, digits or `_`.
+fn valid_name(s: str) -> bool
+  ex valid_name("ann_1")
+  ex !valid_name("a-b")
+  ex !valid_name("")
+  ex !valid_name("seventeen_chars_x")
+{
+  return s.len() >= 1 && s.len() <= 16 && s.bytes().all(|b| b.is_alpha() || b.is_digit() || b == '_')
+}
+
+fn set_nick(state: Shared[State], id: int, name: str) ! io {
+  if !valid_name(name) {
+    reply(state, id, "error: a nickname is 1 to 16 letters, digits or _")
+    return
+  }
+  // The old nickname, or `none` if another client has this one.
+  let old: ?str = lock state as s {
+    if s.clients.pairs().any(|p| p.0 != id && p.1.nick == name) {
+      none
+    } else {
+      var c = s.clients[id]
+      let before = c.nick
+      c.nick = name
+      s.clients[id] = c
+      before
+    }
+  }
+  let before = old else {
+    reply(state, id, "error: that nickname is taken")
+    return
+  }
+  reply(state, id, "ok")
+  if !before.is_empty() {
+    announce(state, id, "* ${before} is now ${name}")
+  }
+}
+
+fn join(state: Shared[State], id: int, room: str) ! io {
+  let me = lock state as s { s.clients[id] }
+  if me.nick.is_empty() {
+    reply(state, id, "error: set a nickname first")
+    return
+  }
+  if !valid_name(room) {
+    reply(state, id, "error: a room name is 1 to 16 letters, digits or _")
+    return
+  }
+  if me.room != room {
+    announce(state, id, "* ${me.nick} left")
+    lock state as s {
+      var c = s.clients[id]
+      c.room = room
+      s.clients[id] = c
+    }
+    announce(state, id, "* ${me.nick} joined")
+  }
+  reply(state, id, "ok")
+}
+
+fn say(state: Shared[State], id: int, text: str) ! io {
+  let nick = lock state as s { s.clients[id].nick }
+  if nick.is_empty() {
+    reply(state, id, "error: set a nickname first")
+    return
+  }
+  announce(state, id, "${nick}: ${text}")
+}
+
+fn leave(state: Shared[State], id: int) ! io {
+  let nick = lock state as s { s.clients[id].nick }
+  if !nick.is_empty() {
+    announce(state, id, "* ${nick} left")
+  }
+  lock state as s {
+    _ = s.clients.remove(id)
+  }
+}
+
+fn reply(state: Shared[State], id: int, line: str) ! io {
+  let me = lock state as s { s.clients[id] }
+  deliver(me, line)
+}
+
+// Sends `line` to everyone else in client `id`'s room who has a nickname.
+fn announce(state: Shared[State], id: int, line: str) ! io {
+  let others = lock state as s {
+    let room = s.clients[id].room
+    s.clients.pairs().filter(|p| p.0 != id && p.1.room == room && !p.1.nick.is_empty()).map(|p| p.1)
+  }
+  for c in others {
+    deliver(c, line)
+  }
+}
+
+// Queues a line for a client, or disconnects it if it has stopped reading.
+// The margin leaves room for other tasks sending at the same time, so `send`
+// never waits.
+fn deliver(c: Client, line: str) ! io {
+  if c.out.len() >= QUEUE - 100 {
+    c.conn.close()
+    return
+  }
+  c.out.send(line) catch e {}
+}

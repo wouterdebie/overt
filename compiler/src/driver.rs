@@ -234,11 +234,7 @@ fn outline_cmd(args: &[String]) -> i32 {
     };
     let std_file = stdlib::outline_file(target);
     if std_file.is_none() && stdlib::MODULE_NAMES.contains(&target.as_str()) {
-        let m = match target.as_str() {
-            "time" | "net" => "3",
-            "http" | "json" => "4",
-            _ => "5",
-        };
+        let m = stdlib::planned_milestone(target);
         eprintln!("error: the `{target}` module isn't available in this compiler yet (planned for milestone {m})");
         return 1;
     }

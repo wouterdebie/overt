@@ -1,0 +1,51 @@
+// A server and a client in one program, over the loopback interface.
+fn serve(conn: net.Conn) ! io {
+  echo(conn) catch e {}
+  conn.close()
+}
+
+fn echo(conn: net.Conn) ! io, fail {
+  while let line = conn.read_line()? {
+    conn.write("you said: ${line}\n")?
+  }
+}
+
+fn main() ! io, fail {
+  let l = net.listen("127.0.0.1:0")?
+  let port = l.port()
+  print(port > 0)
+  task.group(|g| {
+    g.spawn(|| {
+      let conn = l.accept() catch e { return }
+      serve(conn)
+    })
+    let c = net.connect("127.0.0.1:${port}")?
+    c.write("hello\nworld\r\n")?
+    print(c.read_line()?)
+    print(c.read_line()?)
+    print(c.peer().starts_with("127.0.0.1:"))
+    c.close()
+    print(c.read_line() catch e { none })
+  })?
+  // A read that waits too long fails with .Timeout.
+  let l2 = net.listen("127.0.0.1:0")?
+  let port2 = l2.port()
+  task.group(|g| {
+    g.spawn(|| {
+      let conn = l2.accept() catch e { return }
+      time.sleep(300ms)
+      conn.close()
+    })
+    let c = net.connect("127.0.0.1:${port2}")?
+    c.set_timeout(50ms)
+    print(c.read_line() catch e { "${e.kind}" })
+  })?
+  print(failure(|| net.connect("127.0.0.1:1")?.peer()))
+  print(failure(|| net.listen("nonsense")?.port()))
+}
+
+// How `f` fails, as its error kind.
+fn failure[T](f: fn() -> T ! io, fail) -> str ! io {
+  _ = f() catch e { return "${e.kind}" }
+  return "no failure"
+}

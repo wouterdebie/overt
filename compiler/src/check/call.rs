@@ -231,7 +231,7 @@ impl<'a> Checker<'a> {
     fn module_member(&mut self, cx: &mut FnCx, m: &str, name: &Ident, span: Span, want: Option<&Ty>) -> TExpr {
         let file = cx.file;
         let Some(scope) = self.modules.get(m) else {
-            self.err(file, span, format!("the `{m}` module isn't available in this compiler yet"));
+            self.err(file, span, format!("the `{m}` module isn't available in this compiler yet (planned for milestone {})", stdlib::planned_milestone(&m)));
             return self.error_expr(span);
         };
         if name.name.starts_with('_') && m != self.files[file].module {
@@ -369,7 +369,7 @@ impl<'a> Checker<'a> {
         let file = cx.file;
         if let Some(m) = self.module_of(cx, base) {
             let Some(scope) = self.modules.get(&m) else {
-                self.err(file, span, format!("the `{m}` module isn't available in this compiler yet"));
+                self.err(file, span, format!("the `{m}` module isn't available in this compiler yet (planned for milestone {})", stdlib::planned_milestone(&m)));
                 return self.error_expr(span);
             };
             if name.name.starts_with('_') && m != self.files[file].module {

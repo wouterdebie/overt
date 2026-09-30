@@ -1,0 +1,7 @@
+// A value that tasks share. It can only be read or changed inside
+// `lock s as v { ... }`, where `v` is the value. Copies of a `Shared` refer
+// to the same value.
+type Shared[T] { _cell: fn() -> T }
+
+// A new shared value, holding `v`.
+fn Shared[T].new(v: sink T) -> Shared[T]

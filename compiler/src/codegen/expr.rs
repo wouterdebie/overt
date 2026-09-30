@@ -276,6 +276,28 @@ impl<'p> Gen<'p> {
                 Some(v) => (v, true),
                 None => self.never(),
             },
+            TK::Lock { shared, local, body } => {
+                // Its environment is an ovt_shared (see runtime/rt.c).
+                let s = self.borrow(shared);
+                let cell = self.extract(&s, 0, "%ovt.fn");
+                let env = self.extract(&cell, 1, "ptr");
+                let loc = self.loc_args(span);
+                self.inst(&format!("call void @ovt_shared_lock(ptr {}, {loc})", env.repr));
+                let vp = self.tmp();
+                self.inst(&format!("{vp} = call ptr @ovt_shared_value(ptr {})", env.repr));
+                let slot = self.f.slots[*local].clone();
+                self.inst(&format!("store ptr {vp}, ptr {slot}"));
+                let v = self.block_value(body);
+                if self.f.terminated {
+                    return self.never();
+                }
+                // Unlocking marks what the value reaches shared again.
+                self.inst(&format!("call void @ovt_shared_unlock(ptr {})", env.repr));
+                match v {
+                    Some(v) => (v, true),
+                    None => (V::unit(), false),
+                }
+            }
             TK::Return(v) => {
                 let val = v.as_ref().map(|v| self.owned(v));
                 if !self.f.terminated {

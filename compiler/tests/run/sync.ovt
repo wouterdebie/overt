@@ -1,0 +1,61 @@
+// Channels, shared state, timeouts and sleeping.
+type Counter { hits: Map[str, int], log: [str] }
+
+fn bump(store: Shared[Counter], key: str) -> int {
+  return lock store as c {
+    c.hits[key] = (c.hits.get(key) else 0) + 1
+    c.log.push(key)
+    c.hits[key]
+  }
+}
+
+fn slow() -> int ! io {
+  time.sleep(2s)
+  return 1
+}
+
+fn main() ! io, fail {
+  // A channel between two tasks; `for` receives until it's closed and empty.
+  let ch = Chan[str].new(4)
+  let sums = Chan[int].new(1)
+  task.group(|g| {
+    g.spawn(|| {
+      for i in 0..10 {
+        ch.send("msg ${i}") catch e {}
+      }
+      ch.close()
+    })
+    g.spawn(|| {
+      var n = 0
+      for m in ch {
+        n += m.len()
+      }
+      sums.send(n) catch e {}
+    })
+  })
+  print(sums.recv())
+  print(ch.recv())
+  ch.send("late") catch e { print(e.msg) }
+  // Shared state under contention.
+  let store = Shared.new(Counter(hits: {}, log: []))
+  task.group(|g| {
+    for t in 0..8 {
+      g.spawn(|| {
+        for i in 0..500 {
+          _ = bump(store, "k${i % 5}")
+        }
+      })
+    }
+  })
+  let total = lock store as c { c.log.len() }
+  let k0 = lock store as c { c.hits.get("k0") else 0 }
+  print("${total} ${k0}")
+  // A timeout that cuts a task off, and one that doesn't.
+  let start = time.monotonic()
+  print(task.timeout(50ms, slow) catch e { -1 })
+  print(time.monotonic() - start < 1s)
+  print(task.timeout(5s, || 42)?)
+  print(task.timeout(10ms, slow) catch e { e.msg.len() })
+  let d = 3 * 1s
+  print("${d} ${90s / 4} ${2s + 500ms}")
+}

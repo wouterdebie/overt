@@ -140,8 +140,8 @@ Everything is a value: assigning or passing one gives the receiver its own copy.
 |---|---|---|
 | plain | numbers, `bool`, structs of plain fields | copies the bytes |
 | heap-backed | `str`, `[T]`, `Map`, `Set` | shares the data until a write |
-| resource | `net.Conn`, `fs.File`, C handles | not allowed; values move |
-| shared handle | `Shared[T]`, `Atomic[T]`, `Chan[T]` | both copies refer to the same object |
+| resource | `fs.File`, C handles | not allowed; values move |
+| shared handle | `Shared[T]`, `Atomic[T]`, `Chan[T]`, `net.Conn` | both copies refer to the same object |
 
 - `let` bindings can't change; `var` bindings can. Parameters are read-only unless marked.
 
@@ -219,7 +219,7 @@ return render(user, posts)
 - `task.group(|g| { ... g.spawn(|| handle(conn)) ... })` runs any number of tasks and returns once all have finished. Spawned closures can't fail; they handle their own errors.
 - `task.timeout(5s, || fetch(url))` fails with `.Timeout` if time runs out. A cancelled task's next `io` call fails with `.Cancelled`.
 - Tasks share nothing: a value handed to a task is a copy. Shared mutable state uses shared handles:
-  - `Shared[T]`: create with `Shared.new(v)`. `lock s as v { ... }` gives `v: inout T` for the block. It works on any `Shared` value, including a read-only parameter. No `io` is allowed inside a `lock` block.
+  - `Shared[T]`: create with `Shared.new(v)`. `lock s as v { ... }` gives `v: inout T` for the block. It works on any `Shared` value, including a read-only parameter. No `io` is allowed inside a `lock` block, and a failure, `return` or `break` can't leave it.
   - `Atomic[int]`: `.load()`, `.store(n)`, `.add(n)`.
   - `Chan[T]`: bounded queue, created with `Chan[Msg].new(64)`. `.send(v)` waits while it's full (`! io, fail`). `.recv()` returns `none` once it's closed and empty (`! io`). Also `.close()` and `for m in ch { ... }`.
 

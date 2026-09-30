@@ -297,6 +297,10 @@ impl Zonk<'_> {
                 }
             }
             TK::Block(b) => self.block(b),
+            TK::Lock { shared, body, .. } => {
+                self.expr(shared);
+                self.block(body);
+            }
             TK::Return(v) => {
                 if let Some(v) = v {
                     self.expr(v);
@@ -400,6 +404,10 @@ pub fn walk_expr(e: &TExpr, f: &mut dyn FnMut(&TExpr)) {
             }
         }
         TK::Block(b) => block(b, f),
+        TK::Lock { shared, body, .. } => {
+            walk_expr(shared, f);
+            block(body, f);
+        }
         TK::Return(Some(v)) => walk_expr(v, f),
         TK::Catch { value, body, .. } => {
             walk_expr(value, f);

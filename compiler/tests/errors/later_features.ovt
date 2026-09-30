@@ -1,0 +1,7 @@
+fn main() ! io, fail {
+  http.serve(":8080", |req| http.text(200, "hi"))?
+  let raw: [u8; 4] = [0, 0, 0, 0]
+  unsafe {
+    print(raw)
+  }
+}

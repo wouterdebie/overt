@@ -1,0 +1,7 @@
+// Waiting, and measuring time.
+
+// Waits for `d`, or less if the task is cancelled.
+fn sleep(d: Dur) ! io
+
+// The time since the program started, for measuring how long things take.
+fn monotonic() -> Dur ! io

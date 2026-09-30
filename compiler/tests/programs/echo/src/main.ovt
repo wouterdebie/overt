@@ -1,0 +1,31 @@
+// echo <port>: sends back every line it receives.
+fn main() ! io, fail {
+  let args = os.args()
+  if args.len() != 1 {
+    fail(.Invalid, "usage: echo <port>")
+  }
+  let port = int.parse(args[0]) else fail(.Invalid, "the port must be a number")
+  if port < 1 || port > 65535 {
+    fail(.Invalid, "the port must be from 1 to 65535")
+  }
+  let listener = net.listen("127.0.0.1:${port}")?
+  task.group(|g| {
+    while true {
+      let conn = listener.accept()?
+      g.spawn(|| serve(conn))
+    }
+  })?
+}
+
+// Echoes lines until the client closes or something goes wrong.
+fn serve(conn: net.Conn) ! io {
+  echo_lines(conn) catch e {}
+}
+
+fn echo_lines(conn: net.Conn) ! io, fail {
+  while let line = conn.read_line_bytes()? {
+    var out = line
+    out.push(10)
+    conn.write_bytes(out)?
+  }
+}

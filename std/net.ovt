@@ -1,0 +1,49 @@
+// TCP connections. A `Listener` or `Conn` is a handle: copies share one
+// socket, which closes when the last copy is gone or `close` is called.
+
+// A socket that accepts connections.
+type Listener { _cell: fn() -> int }
+
+// A TCP connection.
+type Conn { _cell: fn() -> int }
+
+// Listens on `addr`, like "127.0.0.1:8080", or ":8080" for every interface.
+fn listen(addr: str) -> Listener ! io, fail
+
+// Connects to `addr`, like "127.0.0.1:8080".
+fn connect(addr: str) -> Conn ! io, fail
+
+// Waits for the next connection.
+fn Listener.accept(self) -> Conn ! io, fail
+
+// The port it listens on, which matters after listening on port 0.
+fn Listener.port(self) -> int ! io
+
+// Stops listening.
+fn Listener.close(self) ! io
+
+// The next line, without its "\n" (or "\r\n"), or `none` once the other side
+// has closed the connection; an unfinished last line is dropped. Fails with
+// `.Invalid` for a line that isn't UTF-8 or is over 1 MiB.
+fn Conn.read_line(self) -> ?str ! io, fail
+
+// The next line as bytes, without its "\n" (or "\r\n").
+fn Conn.read_line_bytes(self) -> ?[u8] ! io, fail
+
+// The bytes that have arrived, waiting for at least one; empty once the other
+// side has closed the connection.
+fn Conn.read(self) -> [u8] ! io, fail
+
+// Sends all of `data`, waiting while the other side is slow to read.
+fn Conn.write(self, data: str) ! io, fail
+
+fn Conn.write_bytes(self, data: [u8]) ! io, fail
+
+// From now on, a read or write that waits longer than `d` fails with `.Timeout`.
+fn Conn.set_timeout(self, d: Dur) ! io
+
+// Closes the connection. Reads and writes waiting in other tasks end at once.
+fn Conn.close(self) ! io
+
+// The other side's address, like "127.0.0.1:52034".
+fn Conn.peer(self) -> str ! io

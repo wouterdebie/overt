@@ -57,6 +57,10 @@ pub struct Known {
     /// `Map.equals` and `Set.equals`, which `==` on maps and sets calls.
     pub map_equals: FnId,
     pub set_equals: FnId,
+    /// `Chan` and `Shared`, which `for v in ch` and `lock` need, and `Chan.recv`.
+    pub chan: AdtId,
+    pub shared: AdtId,
+    pub chan_recv: FnId,
 }
 
 pub struct AdtDef {
@@ -201,6 +205,9 @@ pub enum TK {
     Call { f: FnId, targs: Vec<Ty>, eargs: Vec<Eff>, args: Vec<TArg> },
     /// Calling a function value (a closure or a named function).
     CallValue { callee: Box<TExpr>, args: Vec<TArg> },
+    /// `lock s as v { body }`: `local` refers to the shared value while the
+    /// lock is held; the block's value is the expression's.
+    Lock { shared: Box<TExpr>, local: LocalId, body: TBlock },
     FnValue { f: FnId, targs: Vec<Ty>, eargs: Vec<Eff> },
     Closure { id: ClosureId },
     Struct { adt: AdtId, targs: Vec<Ty>, fields: Vec<TExpr> },

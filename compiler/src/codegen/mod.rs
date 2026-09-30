@@ -11,6 +11,7 @@
 
 mod expr;
 mod func;
+mod handles;
 mod helpers;
 mod intrin;
 mod par;
@@ -73,6 +74,8 @@ enum Work {
     MapBody { t: Ty, u: Ty, failable: bool, sym: String },
     /// The dispatch function of a `par` (see `par.rs`).
     ParBody { sigs: Vec<(Ty, bool)>, sym: String },
+    /// The body `task.timeout` runs in its child task (see `handles.rs`).
+    TimeoutBody { t: Ty, fails: bool, sym: String },
 }
 
 pub struct Gen<'p> {
@@ -88,6 +91,7 @@ pub struct Gen<'p> {
     closure_marks: HashMap<(ClosureId, Vec<Ty>), String>,
     map_bodies: HashMap<(Ty, Ty, bool), String>,
     par_bodies: HashMap<Vec<(Ty, bool)>, String>,
+    timeout_bodies: HashMap<(Ty, bool), String>,
     thunks: HashMap<(FnId, Vec<Ty>, bool, bool), String>,
     helpers: HashMap<(Helper, Ty), String>,
     helper_syms: std::collections::HashSet<String>,
@@ -116,6 +120,7 @@ pub fn emit(p: &Program, srcs: &[&Source], entry: Entry) -> String {
         closure_marks: HashMap::new(),
         map_bodies: HashMap::new(),
         par_bodies: HashMap::new(),
+        timeout_bodies: HashMap::new(),
         thunks: HashMap::new(),
         helpers: HashMap::new(),
         helper_syms: std::collections::HashSet::new(),
@@ -142,6 +147,7 @@ pub fn emit(p: &Program, srcs: &[&Source], entry: Entry) -> String {
             Work::ClosureMark { id, targs, eargs, sym } => g.emit_closure_mark(id, &targs, &eargs, &sym),
             Work::MapBody { t, u, failable, sym } => g.emit_map_body(&t, &u, failable, &sym),
             Work::ParBody { sigs, sym } => g.emit_par_body(&sigs, &sym),
+            Work::TimeoutBody { t, fails, sym } => g.emit_timeout_body(&t, fails, &sym),
         };
         g.body.push_str(&text);
         g.body.push('\n');
@@ -187,6 +193,31 @@ declare void @ovt_mark_buf(ptr, i64, ptr)
 declare void @ovt_mark_box(ptr, ptr)
 declare void @ovt_mark_env(ptr)
 declare void @ovt_mark_none(ptr)
+declare void @ovt_shared_lock(ptr, ptr, i32, i32)
+declare void @ovt_shared_unlock(ptr)
+declare ptr @ovt_shared_value(ptr)
+declare ptr @ovt_shared_new(i64, ptr, ptr)
+declare ptr @ovt_chan_new(i64, i64, ptr)
+declare i32 @ovt_chan_send(ptr, ptr, ptr)
+declare i32 @ovt_chan_recv(ptr, ptr)
+declare void @ovt_chan_close(ptr)
+declare i64 @ovt_chan_len(ptr)
+declare i32 @ovt_net_listen(ptr, ptr, ptr)
+declare i32 @ovt_net_connect(ptr, ptr, ptr)
+declare i32 @ovt_net_accept(ptr, ptr, ptr)
+declare i32 @ovt_net_read_line(ptr, ptr, i32, ptr, ptr)
+declare i32 @ovt_net_read(ptr, ptr, ptr)
+declare i32 @ovt_net_write(ptr, ptr, ptr)
+declare void @ovt_net_set_timeout(ptr, i64)
+declare void @ovt_net_close(ptr)
+declare void @ovt_net_peer(ptr, ptr)
+declare i64 @ovt_net_port(ptr)
+declare void @ovt_time_sleep(i64)
+declare i64 @ovt_time_monotonic()
+declare ptr @ovt_group_new()
+declare void @ovt_group_spawn(ptr, ptr, ptr, ptr, i32, i32)
+declare void @ovt_group_wait(ptr, i32)
+declare i32 @ovt_timeout(i64, ptr, ptr)
 declare i32 @ovt_rt_run(ptr)
 declare i64 @ovt_parallel(i64, ptr, ptr)
 declare ptr @ovt_buf_new(i64, i64)
@@ -588,6 +619,17 @@ impl<'p> Gen<'p> {
         let sym = format!("@\"closure.{id}<{}>.mark\"", targs.iter().map(|t| quote_sym(&self.mangle(t))).collect::<Vec<_>>().join(","));
         self.closure_marks.insert(key, sym.clone());
         self.queue.push_back(Work::ClosureMark { id, targs: targs.to_vec(), eargs: eargs.to_vec(), sym: sym.clone() });
+        sym
+    }
+
+    pub fn timeout_body(&mut self, t: &Ty, fails: bool) -> String {
+        let key = (t.clone(), fails);
+        if let Some(s) = self.timeout_bodies.get(&key) {
+            return s.clone();
+        }
+        let sym = format!("@\"task.timeout.body<{}>{}\"", quote_sym(&self.mangle(t)), if fails { ".fails" } else { "" });
+        self.timeout_bodies.insert(key, sym.clone());
+        self.queue.push_back(Work::TimeoutBody { t: t.clone(), fails, sym: sym.clone() });
         sym
     }
 

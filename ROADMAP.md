@@ -163,7 +163,7 @@ Milestone 4's service, with the todos stored in sqlite.
 
 After milestone 6, review the language as a whole:
 - Resolve or explicitly defer every open question in DESIGN.md.
-- Make sure SPEC.md is still under its 5,000-token cap.
+- Make sure SPEC.md and the std outline are still within their budgets (6,000 and 12,000 tokens).
 - Call the result spec v1.
 
 Changing the language gets expensive after this point, because every change has to be made in two compilers until milestone 7 is done.

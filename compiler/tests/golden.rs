@@ -144,11 +144,55 @@ fn spec_code_blocks_are_canonical() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
+/// Tokens by `o200k_base`, a proxy for Claude's tokenizer, through `uvx` and
+/// tiktoken; without them, an estimate from the length that errs high.
+fn tokens(text: &str) -> (usize, &'static str) {
+    let script = "import sys, tiktoken; print(len(tiktoken.get_encoding('o200k_base').encode(sys.stdin.read())))";
+    let child = Command::new("uvx").args(["--with", "tiktoken", "python", "-c", script]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+    if let Ok(mut child) = child {
+        let _ = child.stdin.take().unwrap().write_all(text.as_bytes());
+        if let Ok(out) = child.wait_with_output() {
+            if let Ok(n) = String::from_utf8_lossy(&out.stdout).trim().parse() {
+                return (n, "o200k_base");
+            }
+        }
+    }
+    (text.len() * 10 / 32, "an estimate (no uvx)")
+}
+
+/// Agents get SPEC.md and the outline of every std module in their prompt
+/// (bench/run.py builds it the same way), so both have a budget.
+#[test]
+fn docs_fit_their_budgets() {
+    const SPEC_MAX: usize = 6000;
+    const DOCS_MAX: usize = 12_000;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let spec = read(&root.join("SPEC.md"));
+    let mut names: Vec<String> = std::fs::read_dir(root.join("std"))
+        .unwrap()
+        .filter_map(|e| e.ok()?.path().file_stem().map(|s| s.to_string_lossy().to_string()))
+        .filter(|n| n != "prelude")
+        .collect();
+    names.sort();
+    names.insert(0, "prelude".into());
+    let mut parts = Vec::new();
+    for n in &names {
+        let out = ovt().args(["outline", n]).output().unwrap();
+        assert!(out.status.success(), "ovt outline {n} failed");
+        parts.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    let outline = parts.join("\n\n");
+    let (spec_n, how) = tokens(&spec);
+    let (outline_n, _) = tokens(&outline);
+    assert!(spec_n <= SPEC_MAX, "SPEC.md is {spec_n} tokens by {how}, over its budget of {SPEC_MAX}");
+    assert!(spec_n + outline_n <= DOCS_MAX, "SPEC.md and the std outline are {} tokens by {how}, over their budget of {DOCS_MAX}", spec_n + outline_n);
+}
+
 #[test]
 fn reference_programs_pass_task_tests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
-    for (name, task) in [("wordfreq", "01-wordfreq"), ("jsonfmt", "01-jsonfmt"), ("hashdir", "02-hashdir")] {
+    for (name, task) in [("wordfreq", "01-wordfreq"), ("jsonfmt", "01-jsonfmt"), ("hashdir", "02-hashdir"), ("echo", "03-echo"), ("chat", "03-chat")] {
         let dir = root.join("tests/programs").join(name);
         let bin = dir.join("bin").join(name);
         let out = ovt().current_dir(&dir).args(["build", "-o"]).arg(&bin).output().unwrap();

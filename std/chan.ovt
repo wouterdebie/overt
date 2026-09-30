@@ -1,0 +1,21 @@
+// A bounded queue between tasks. Copies of a `Chan` share one queue. A value
+// sent through it is a copy, like every value handed to another task.
+// `for v in ch { ... }` receives until the channel is closed and empty.
+type Chan[T] { _cell: fn() -> T }
+
+// A new channel that holds up to `cap` values (at least 1).
+fn Chan[T].new(cap: int) -> Chan[T]
+
+// Sends `v`, waiting while the channel is full. Fails with `.Unavailable`
+// once it's closed.
+fn Chan[T].send(self, v: sink T) ! io, fail
+
+// The next value, waiting while the channel is empty, or `none` once it's
+// closed and empty.
+fn Chan[T].recv(self) -> ?T ! io
+
+// Closes the channel: receivers get what's left and then `none`, and senders fail.
+fn Chan[T].close(self) ! io
+
+// How many values are waiting to be received.
+fn Chan[T].len(self) -> int ! io

@@ -1,0 +1,5 @@
+lock_rules.ovt:5:5: error: a `lock` block can't do `io`, but `print` has the `io` effect; do it after the block
+lock_rules.ovt:8:11: error: a failure can't leave a `lock` block, and `int.parse` passes one on; handle it there with `else` or `catch`, or fail after the block
+lock_rules.ovt:13:9: error: `break` and `continue` can't leave a `lock` block; finish the block, then break
+lock_rules.ovt:18:5: error: `return` can't be used in a `lock` block; compute the value in the block and return after it
+lock_rules.ovt:20:8: error: `lock` needs a `Shared[T]`, but this is `[int]`
