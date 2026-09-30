@@ -1,0 +1,6 @@
+type User { name: str }
+
+fn main() ! io, fail {
+  let a = json.decode[User, str]("{}")?
+  let b = json.decode[5]("1")?
+}

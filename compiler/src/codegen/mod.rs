@@ -14,6 +14,7 @@ mod func;
 mod handles;
 mod helpers;
 mod intrin;
+mod json;
 mod par;
 mod pat;
 
@@ -61,6 +62,10 @@ pub enum Helper {
     Cmp,
     Hash,
     Show,
+    /// Appends a value's JSON to a string being built (see `json.rs`).
+    JsonEnc,
+    /// Reads a value from JSON (see `json.rs`).
+    JsonDec,
 }
 
 enum Work {
@@ -207,6 +212,34 @@ declare i32 @ovt_net_connect(ptr, ptr, ptr)
 declare i32 @ovt_net_accept(ptr, ptr, ptr)
 declare i32 @ovt_net_read_line(ptr, ptr, i32, ptr, ptr)
 declare i32 @ovt_net_read(ptr, ptr, ptr)
+declare void @ovt_sb_json_str(ptr, ptr)
+declare void @ovt_sb_json_f64(ptr, double)
+declare ptr @ovt_jp_new(ptr)
+declare i32 @ovt_jp_finish(ptr, i32, ptr)
+declare i32 @ovt_jp_null(ptr)
+declare i32 @ovt_jp_bool(ptr)
+declare i32 @ovt_jp_int(ptr, ptr, i64, i64)
+declare i32 @ovt_jp_uint(ptr, ptr)
+declare i32 @ovt_jp_f64(ptr, ptr)
+declare i32 @ovt_jp_str(ptr, ptr)
+declare i32 @ovt_jp_arr(ptr)
+declare i32 @ovt_jp_obj(ptr)
+declare i32 @ovt_jp_next(ptr, i32)
+declare i32 @ovt_jp_key(ptr, i32)
+declare i32 @ovt_jp_name(ptr)
+declare i32 @ovt_jp_key_is(ptr, ptr, i64)
+declare void @ovt_jp_take_key(ptr, ptr)
+declare void @ovt_jp_at_field(ptr, ptr, i64)
+declare void @ovt_jp_at_index(ptr, i64)
+declare void @ovt_jp_at_key(ptr, ptr)
+declare void @ovt_jp_missing(ptr, ptr, i64)
+declare void @ovt_jp_bad_name(ptr, ptr, i64)
+declare void @ovt_jp_bad_len(ptr, i64)
+declare void @ovt_jp_one_key(ptr)
+declare void @ovt_jp_expected(ptr, ptr)
+declare i32 @ovt_jp_peek(ptr)
+declare i32 @ovt_jp_skip(ptr)
+declare i32 @ovt_net_read_exactly(ptr, i64, ptr, ptr)
 declare i32 @ovt_net_write(ptr, ptr, ptr)
 declare void @ovt_net_set_timeout(ptr, i64)
 declare void @ovt_net_close(ptr)
@@ -681,6 +714,8 @@ impl<'p> Gen<'p> {
             Helper::Cmp => "cmp",
             Helper::Hash => "hash",
             Helper::Show => "show",
+            Helper::JsonEnc => "jsonenc",
+            Helper::JsonDec => "jsondec",
         };
         let sym = format!("@\"{k}.{}\"", quote_sym(&self.mangle(ty)));
         self.helpers.insert((kind, ty.clone()), sym.clone());

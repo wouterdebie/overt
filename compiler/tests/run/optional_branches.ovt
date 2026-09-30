@@ -1,0 +1,26 @@
+// Branches where one is `none` make an optional.
+
+fn half(n: int) -> ?int {
+  let h = if n % 2 == 0 { n / 2 } else { none }
+  return h
+}
+
+fn name(code: int) -> ?str {
+  let n = match code {
+    1 => "one"
+    2 => "two"
+    _ => none
+  }
+  return n
+}
+
+fn main() ! io {
+  print(half(4))
+  print(half(3))
+  print(name(2))
+  print(name(7))
+  let first = if let x = half(8) { x + 1 } else { none }
+  print(first)
+  let nested = if true { none } else { "never" }
+  print(nested)
+}

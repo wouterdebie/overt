@@ -336,6 +336,7 @@ def agent_run(task, lang, model, timeout_min, ovt, docs):
         "perf_seconds": None,
         "perf_cpu_seconds": None,
         "perf_correct": None,
+        "perf": None,
     }
     fp = stats["first_pass"] or {}
     print(
@@ -348,16 +349,16 @@ def agent_run(task, lang, model, timeout_min, ovt, docs):
 
 
 def time_program(task, binary):
-    """(wall seconds, CPU seconds if the speed test reports them, correct)."""
+    """(seconds, CPU seconds if the speed test reports them, correct, everything it reported)."""
     perf = REPO / "tasks" / task / "tests" / "perf.py"
     if not binary or not perf.exists():
-        return None, None, None
+        return None, None, None, None
     r = sh(["python3", str(perf), str(binary)], REPO / "tasks" / task, timeout=3600)
     try:
         p = json.loads(r.stdout.strip().splitlines()[-1])
-        return p["seconds"], p.get("cpu_seconds"), p["correct"]
+        return p["seconds"], p.get("cpu_seconds"), p["correct"], p
     except (IndexError, ValueError, KeyError):
-        return None, None, False
+        return None, None, False, None
 
 
 def main():
@@ -386,7 +387,7 @@ def main():
     results_dir.mkdir(exist_ok=True)
     for record, binary in done:
         if not a.no_perf and record.get("tests_passed") and record["tests_passed"] == record.get("tests_total"):
-            record["perf_seconds"], record["perf_cpu_seconds"], record["perf_correct"] = time_program(a.task, binary)
+            record["perf_seconds"], record["perf_cpu_seconds"], record["perf_correct"], record["perf"] = time_program(a.task, binary)
             print(f"[{record['run_id']}] perf {record['perf_seconds']}s (correct: {record['perf_correct']})", flush=True)
         with open(results_dir / f"{a.task}.jsonl", "a") as f:
             f.write(json.dumps(record) + "\n")

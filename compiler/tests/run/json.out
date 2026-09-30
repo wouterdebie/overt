@@ -1,0 +1,37 @@
+{"id":1,"title":"say \"hi\"\n\u0001 ü","done":true}
+{"title":null,"done":true}
+[{"Circle":{"r":1.5}},{"Rect":{"w":1.0,"h":2.0}},"Empty"]
+{"name":"a","kids":[{"name":"b","kids":[]}]}
+{"x":7,"tags":["a","b"],"m":{"k":[1,2]},"pair":[3,"x"],"c":"Green","f":0.5}
+{"items":[1,2],"next":"p2"}
+[null,0.1,-2.0]
+{"status":204,"headers":{}}
+Todo(id: 5, title: "é🙂\n", done: false)
+Change(title: none, done: false)
+[Circle(r: 2.0), Empty, Rect(w: 35.0, h: 1.0)]
+Tree(name: "r", kids: [Tree(name: "k", kids: [])])
+Mix(x: 255, tags: {"q"}, m: {"a": [1], "b": []}, pair: (9, "z"), c: Red, f: 1.0)
+Page(items: ["a"], next: none)
+Resp(status: 200, headers: {})
+error: invalid JSON: expected a key in quotes, but the input ended
+error: expected an object, got an array
+error: id: expected a number, got a string
+error: missing "title"
+error: id: expected an integer, got 1.5
+error: invalid JSON at byte 24: expected the end of the input, got 'x'
+error: id: expected an integer that fits in 64 bits, got 99999999999999999999
+error: invalid JSON at byte 26: expected a low surrogate \u escape, got '"'
+error: invalid JSON at byte 23: expected a key in quotes, got '}'
+error: invalid JSON at byte 1: expected a key in quotes, got '''
+error: invalid JSON: expected an object, but the input ended
+error: x: expected an integer from 0 to 255, got 256
+error: tags[0]: expected a string, got a number
+error: m["k"][1]: expected a number, got a string
+error: pair: expected an array of 2 elements
+error: pair: expected an array of 2 elements
+error: c: expected one of "Red", "Green", got "Blue"
+error: [0].Circle: missing "r"
+error: [0]: expected an object with one key, the variant's name
+error: [0]: expected one of "Empty", got "Circle"
+error: [0]: expected a string or an object, got a number
+error: [0]: expected one of "Circle", "Rect", got "Square"

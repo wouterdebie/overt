@@ -621,6 +621,548 @@ int32_t ovt_parse_f64(const ovt_str *s, double *out) {
   return 1;
 }
 
+// ---- JSON ----
+//
+// `json.encode` and `json.decode` are generated for each type (see
+// codegen/json.rs). Encoding appends to a string builder with the helpers
+// below. Decoding drives a scanner over the input: each generated decoder
+// calls these functions and returns false on the first error, which the
+// scanner records. The path to the failing value (`items[2].name`) is built
+// while the decoders return.
+
+static void str_from(ovt_str *out, const char *p, int64_t n);
+
+static void json_str_to(ovt_str *sb, const unsigned char *d, int64_t n) {
+  static const char hexd[] = "0123456789abcdef";
+  ovt_str_append_bytes(sb, "\"", 1);
+  int64_t start = 0;
+  for (int64_t i = 0; i < n; i++) {
+    unsigned char c = d[i];
+    if (c >= 0x20 && c != '"' && c != '\\') continue;
+    ovt_str_append_bytes(sb, (const char *)d + start, i - start);
+    char esc[6] = {'\\', 0, 0, 0, 0, 0};
+    int len = 2;
+    switch (c) {
+      case '"': esc[1] = '"'; break;
+      case '\\': esc[1] = '\\'; break;
+      case '\n': esc[1] = 'n'; break;
+      case '\t': esc[1] = 't'; break;
+      case '\r': esc[1] = 'r'; break;
+      case '\b': esc[1] = 'b'; break;
+      case '\f': esc[1] = 'f'; break;
+      default:
+        esc[1] = 'u';
+        esc[2] = '0';
+        esc[3] = '0';
+        esc[4] = hexd[c >> 4];
+        esc[5] = hexd[c & 15];
+        len = 6;
+    }
+    ovt_str_append_bytes(sb, esc, len);
+    start = i + 1;
+  }
+  ovt_str_append_bytes(sb, (const char *)d + start, n - start);
+  ovt_str_append_bytes(sb, "\"", 1);
+}
+
+void ovt_sb_json_str(ovt_str *sb, const ovt_str *s) { json_str_to(sb, (const unsigned char *)sdata(s), s->len); }
+
+// NaN and the infinities have no JSON form; they encode as null.
+void ovt_sb_json_f64(ovt_str *sb, double v) {
+  if (v != v || v == 1.0 / 0.0 || v == -1.0 / 0.0) ovt_str_append_bytes(sb, "null", 4);
+  else ovt_sb_f64(sb, v);
+}
+
+enum { JSON_MAX_DEPTH = 500 };
+
+typedef struct {
+  const unsigned char *d;
+  int64_t n, i;
+  int failed, syntax, depth;
+  ovt_str msg;
+  char *path; // the path to the failing value, built back to front
+  int64_t plen;
+  ovt_str key; // the last object key or variant name
+} ovt_jp;
+
+ovt_jp *ovt_jp_new(const ovt_str *s) {
+  ovt_jp *p = calloc(1, sizeof *p);
+  if (!p) oom();
+  p->d = (const unsigned char *)sdata(s);
+  p->n = s->len;
+  return p;
+}
+
+static void jp_ws(ovt_jp *p) {
+  while (p->i < p->n && (p->d[p->i] == ' ' || p->d[p->i] == '\n' || p->d[p->i] == '\r' || p->d[p->i] == '\t')) p->i++;
+}
+
+// Sets the error message.
+static void jp_msg(ovt_jp *p, const char *m, int64_t n) {
+  ovt_buf_release(p->msg.buf, 1, NULL);
+  str_from(&p->msg, m, n);
+  p->failed = 1;
+}
+
+static int jp_syntax(ovt_jp *p, const char *what) {
+  if (p->failed) return 0;
+  char m[200];
+  int n;
+  if (p->i >= p->n) n = snprintf(m, sizeof m, "invalid JSON: %s, but the input ended", what);
+  else {
+    unsigned char c = p->d[p->i];
+    if (c >= 0x20 && c < 0x7f) n = snprintf(m, sizeof m, "invalid JSON at byte %lld: %s, got '%c'", (long long)p->i, what, c);
+    else n = snprintf(m, sizeof m, "invalid JSON at byte %lld: %s", (long long)p->i, what);
+  }
+  jp_msg(p, m, n);
+  p->syntax = 1;
+  return 0;
+}
+
+// What the next value is, for messages: "a string", "null".
+static const char *jp_kind(ovt_jp *p) {
+  if (p->i >= p->n) return NULL;
+  switch (p->d[p->i]) {
+    case '"': return "a string";
+    case '{': return "an object";
+    case '[': return "an array";
+    case 't': case 'f': return "a boolean";
+    case 'n': return "null";
+    default: return (p->d[p->i] == '-' || (p->d[p->i] >= '0' && p->d[p->i] <= '9')) ? "a number" : NULL;
+  }
+}
+
+static int jp_type(ovt_jp *p, const char *want) {
+  if (p->failed) return 0;
+  const char *got = jp_kind(p);
+  if (!got) {
+    char m[64];
+    snprintf(m, sizeof m, "expected %s", want);
+    return jp_syntax(p, m);
+  }
+  char m[200];
+  int n = snprintf(m, sizeof m, "expected %s, got %s", want, got);
+  jp_msg(p, m, n);
+  return 0;
+}
+
+static void jp_prepend(ovt_jp *p, const char *seg, int64_t n) {
+  if (p->syntax) return;
+  char *np = realloc(p->path, (size_t)(p->plen + n));
+  if (!np) oom();
+  memmove(np + n, np, (size_t)p->plen);
+  memcpy(np, seg, (size_t)n);
+  p->path = np;
+  p->plen += n;
+}
+
+// While returning from a failed field or element: adds it to the path.
+void ovt_jp_at_field(ovt_jp *p, const char *name, int64_t n) {
+  jp_prepend(p, name, n);
+  jp_prepend(p, ".", 1);
+}
+
+void ovt_jp_at_index(ovt_jp *p, int64_t i) {
+  char m[32];
+  int n = snprintf(m, sizeof m, "[%lld]", (long long)i);
+  jp_prepend(p, m, n);
+}
+
+// Like ovt_jp_at_field, for a map key.
+void ovt_jp_at_key(ovt_jp *p, const ovt_str *key) {
+  ovt_str seg = {0};
+  str_from(&seg, "[", 1);
+  json_str_to(&seg, (const unsigned char *)sdata(key), key->len > 100 ? 100 : key->len);
+  ovt_str_append_bytes(&seg, "]", 1);
+  jp_prepend(p, sdata(&seg), seg.len);
+  ovt_buf_release(seg.buf, 1, NULL);
+}
+
+// Fails with "expected <want>, got ...".
+void ovt_jp_expected(ovt_jp *p, const char *want) { jp_type(p, want); }
+
+// Frees the scanner. Returns 1 with the message in `err` if decoding failed
+// or something other than whitespace follows the value.
+int32_t ovt_jp_finish(ovt_jp *p, int32_t ok, ovt_str *err) {
+  if (ok) {
+    jp_ws(p);
+    if (p->i < p->n) jp_syntax(p, "expected the end of the input");
+  }
+  int32_t bad = p->failed || !ok;
+  if (bad) {
+    if (p->plen > 0) {
+      const char *path = p->path[0] == '.' ? p->path + 1 : p->path;
+      int64_t plen = p->path[0] == '.' ? p->plen - 1 : p->plen;
+      str_from(err, path, plen);
+      ovt_str_append_bytes(err, ": ", 2);
+      ovt_str_append_bytes(err, sdata(&p->msg), p->msg.len);
+    } else {
+      str_from(err, sdata(&p->msg), p->msg.len);
+    }
+  }
+  ovt_buf_release(p->msg.buf, 1, NULL);
+  ovt_buf_release(p->key.buf, 1, NULL);
+  free(p->path);
+  free(p);
+  return bad;
+}
+
+static int jp_lit(ovt_jp *p, const char *w, int64_t n) {
+  if (p->n - p->i >= n && memcmp(p->d + p->i, w, (size_t)n) == 0) {
+    p->i += n;
+    return 1;
+  }
+  return 0;
+}
+
+// Consumes `null` if it's next.
+int32_t ovt_jp_null(ovt_jp *p) {
+  jp_ws(p);
+  return p->i < p->n && p->d[p->i] == 'n' && jp_lit(p, "null", 4);
+}
+
+// 1 for true, 0 for false, -1 on error.
+int32_t ovt_jp_bool(ovt_jp *p) {
+  jp_ws(p);
+  if (jp_lit(p, "true", 4)) return 1;
+  if (jp_lit(p, "false", 5)) return 0;
+  jp_type(p, "true or false");
+  return -1;
+}
+
+// Scans a number; returns its length, with *integral set, or 0 on error.
+static int64_t jp_number(ovt_jp *p, int *integral) {
+  jp_ws(p);
+  int64_t j = p->i;
+  const unsigned char *d = p->d;
+  *integral = 1;
+  if (j < p->n && d[j] == '-') j++;
+  if (j >= p->n || d[j] < '0' || d[j] > '9') return jp_type(p, "a number");
+  if (d[j] == '0') j++;
+  else while (j < p->n && d[j] >= '0' && d[j] <= '9') j++;
+  if (j < p->n && d[j] == '.') {
+    *integral = 0;
+    j++;
+    if (j >= p->n || d[j] < '0' || d[j] > '9') {
+      p->i = j;
+      return jp_syntax(p, "expected a digit");
+    }
+    while (j < p->n && d[j] >= '0' && d[j] <= '9') j++;
+  }
+  if (j < p->n && (d[j] == 'e' || d[j] == 'E')) {
+    *integral = 0;
+    j++;
+    if (j < p->n && (d[j] == '+' || d[j] == '-')) j++;
+    if (j >= p->n || d[j] < '0' || d[j] > '9') {
+      p->i = j;
+      return jp_syntax(p, "expected a digit");
+    }
+    while (j < p->n && d[j] >= '0' && d[j] <= '9') j++;
+  }
+  return j - p->i;
+}
+
+static int jp_range(ovt_jp *p, int64_t len, const char *range) {
+  char m[200];
+  int n = snprintf(m, sizeof m, "expected an integer%s%s, got %.*s", range ? " " : "", range ? range : "", (int)(len > 40 ? 40 : len), (const char *)p->d + p->i);
+  jp_msg(p, m, n);
+  return 0;
+}
+
+int32_t ovt_jp_int(ovt_jp *p, int64_t *out, int64_t lo, int64_t hi) {
+  int integral;
+  int64_t len = jp_number(p, &integral);
+  if (!len) return 0;
+  char range[80];
+  snprintf(range, sizeof range, "from %lld to %lld", (long long)lo, (long long)hi);
+  int wide = lo == INT64_MIN && hi == INT64_MAX;
+  if (!integral) return jp_range(p, len, NULL);
+  ovt_str t = {0};
+  str_from(&t, (const char *)p->d + p->i, len);
+  int64_t v;
+  int ok = ovt_parse_int(&t, &v);
+  ovt_buf_release(t.buf, 1, NULL);
+  if (!ok || v < lo || v > hi) return jp_range(p, len, wide ? "that fits in 64 bits" : range);
+  p->i += len;
+  *out = v;
+  return 1;
+}
+
+int32_t ovt_jp_uint(ovt_jp *p, uint64_t *out) {
+  int integral;
+  int64_t len = jp_number(p, &integral);
+  if (!len) return 0;
+  if (!integral) return jp_range(p, len, NULL);
+  uint64_t v = 0;
+  if (p->d[p->i] == '-') return jp_range(p, len, "from 0 to 18446744073709551615");
+  for (int64_t k = 0; k < len; k++) {
+    uint64_t digit = (uint64_t)(p->d[p->i + k] - '0');
+    if (v > (UINT64_MAX - digit) / 10) return jp_range(p, len, "from 0 to 18446744073709551615");
+    v = v * 10 + digit;
+  }
+  p->i += len;
+  *out = v;
+  return 1;
+}
+
+int32_t ovt_jp_f64(ovt_jp *p, double *out) {
+  int integral;
+  int64_t len = jp_number(p, &integral);
+  if (!len) return 0;
+  char buf[64];
+  char *big = NULL, *t = buf;
+  if (len >= (int64_t)sizeof buf) {
+    big = malloc((size_t)len + 1);
+    if (!big) oom();
+    t = big;
+  }
+  memcpy(t, p->d + p->i, (size_t)len);
+  t[len] = 0;
+  *out = strtod(t, NULL);
+  free(big);
+  p->i += len;
+  return 1;
+}
+
+static int jp_hex4(ovt_jp *p, int64_t at, uint32_t *out) {
+  if (p->n - at < 4) return 0;
+  uint32_t v = 0;
+  for (int k = 0; k < 4; k++) {
+    unsigned char c = p->d[at + k];
+    int h = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+    if (h < 0) return 0;
+    v = v * 16 + (uint32_t)h;
+  }
+  *out = v;
+  return 1;
+}
+
+static void put_utf8(ovt_str *out, uint32_t c) {
+  char b[4];
+  int n;
+  if (c < 0x80) b[0] = (char)c, n = 1;
+  else if (c < 0x800) b[0] = (char)(0xC0 | c >> 6), b[1] = (char)(0x80 | (c & 63)), n = 2;
+  else if (c < 0x10000) b[0] = (char)(0xE0 | c >> 12), b[1] = (char)(0x80 | ((c >> 6) & 63)), b[2] = (char)(0x80 | (c & 63)), n = 3;
+  else b[0] = (char)(0xF0 | c >> 18), b[1] = (char)(0x80 | ((c >> 12) & 63)), b[2] = (char)(0x80 | ((c >> 6) & 63)), b[3] = (char)(0x80 | (c & 63)), n = 4;
+  ovt_str_append_bytes(out, b, n);
+}
+
+// A string, unescaped, appended to `out`.
+static int jp_string(ovt_jp *p, ovt_str *out) {
+  jp_ws(p);
+  if (p->i >= p->n || p->d[p->i] != '"') return jp_type(p, "a string");
+  p->i++;
+  int64_t start = p->i;
+  for (;;) {
+    if (p->i >= p->n) return jp_syntax(p, "expected '\"' to end the string");
+    unsigned char c = p->d[p->i];
+    if (c == '"') {
+      if (!utf8_valid(p->d + start, p->i - start)) {
+        p->i = start;
+        return jp_syntax(p, "the string isn't valid UTF-8");
+      }
+      ovt_str_append_bytes(out, (const char *)p->d + start, p->i - start);
+      p->i++;
+      return 1;
+    }
+    if (c < 0x20) return jp_syntax(p, "a control character must be escaped in a string");
+    if (c != '\\') {
+      p->i++;
+      continue;
+    }
+    if (!utf8_valid(p->d + start, p->i - start)) {
+      p->i = start;
+      return jp_syntax(p, "the string isn't valid UTF-8");
+    }
+    ovt_str_append_bytes(out, (const char *)p->d + start, p->i - start);
+    if (p->i + 1 >= p->n) {
+      p->i++;
+      return jp_syntax(p, "expected an escape");
+    }
+    char e = (char)p->d[p->i + 1];
+    const char *simple = NULL;
+    switch (e) {
+      case '"': simple = "\""; break;
+      case '\\': simple = "\\"; break;
+      case '/': simple = "/"; break;
+      case 'b': simple = "\b"; break;
+      case 'f': simple = "\f"; break;
+      case 'n': simple = "\n"; break;
+      case 'r': simple = "\r"; break;
+      case 't': simple = "\t"; break;
+    }
+    if (simple) {
+      ovt_str_append_bytes(out, simple, 1);
+      p->i += 2;
+    } else if (e == 'u') {
+      uint32_t c1, c2;
+      if (!jp_hex4(p, p->i + 2, &c1)) {
+        p->i += 2;
+        return jp_syntax(p, "expected 4 hex digits after \\u");
+      }
+      p->i += 6;
+      if (c1 >= 0xD800 && c1 < 0xDC00) {
+        if (p->n - p->i < 6 || p->d[p->i] != '\\' || p->d[p->i + 1] != 'u' || !jp_hex4(p, p->i + 2, &c2) || c2 < 0xDC00 || c2 >= 0xE000)
+          return jp_syntax(p, "expected a low surrogate \\u escape");
+        p->i += 6;
+        c1 = 0x10000 + ((c1 - 0xD800) << 10) + (c2 - 0xDC00);
+      } else if (c1 >= 0xDC00 && c1 < 0xE000) {
+        p->i -= 6;
+        return jp_syntax(p, "a low surrogate \\u escape must follow a high one");
+      }
+      put_utf8(out, c1);
+    } else {
+      p->i++;
+      return jp_syntax(p, "unknown escape");
+    }
+    start = p->i;
+  }
+}
+
+int32_t ovt_jp_str(ovt_jp *p, ovt_str *out) {
+  memset(out, 0, sizeof *out);
+  if (jp_string(p, out)) return 1;
+  ovt_buf_release(out->buf, 1, NULL);
+  memset(out, 0, sizeof *out);
+  return 0;
+}
+
+static int jp_open(ovt_jp *p, unsigned char c, const char *want) {
+  jp_ws(p);
+  if (p->i >= p->n || p->d[p->i] != c) return jp_type(p, want);
+  if (++p->depth > JSON_MAX_DEPTH) return jp_syntax(p, "nested too deeply");
+  p->i++;
+  return 1;
+}
+
+int32_t ovt_jp_arr(ovt_jp *p) { return jp_open(p, '[', "an array"); }
+
+int32_t ovt_jp_obj(ovt_jp *p) { return jp_open(p, '{', "an object"); }
+
+// Before each element of an array or entry of an object: 1 if there's
+// another, 0 at the closing bracket (consumed), -1 on error.
+static int32_t jp_next(ovt_jp *p, int32_t first, unsigned char close) {
+  jp_ws(p);
+  if (p->i < p->n && p->d[p->i] == close) {
+    p->i++;
+    p->depth--;
+    return 0;
+  }
+  if (first) return 1;
+  if (p->i < p->n && p->d[p->i] == ',') {
+    p->i++;
+    return 1;
+  }
+  jp_syntax(p, close == ']' ? "expected ',' or ']'" : "expected ',' or '}'");
+  return -1;
+}
+
+int32_t ovt_jp_next(ovt_jp *p, int32_t first) { return jp_next(p, first, ']'); }
+
+// Before each entry of an object: like ovt_jp_next, and on 1 the key is read.
+int32_t ovt_jp_key(ovt_jp *p, int32_t first) {
+  int32_t r = jp_next(p, first, '}');
+  if (r != 1) return r;
+  jp_ws(p);
+  if (p->i >= p->n || p->d[p->i] != '"') {
+    jp_syntax(p, "expected a key in quotes");
+    return -1;
+  }
+  if (p->key.buf) {
+    p->key.buf->used = 0;
+    p->key.len = 0;
+  }
+  if (!jp_string(p, &p->key)) return -1;
+  jp_ws(p);
+  if (p->i >= p->n || p->d[p->i] != ':') {
+    jp_syntax(p, "expected ':'");
+    return -1;
+  }
+  p->i++;
+  return 1;
+}
+
+// Reads a string as a name, for comparing with ovt_jp_key_is.
+int32_t ovt_jp_name(ovt_jp *p) {
+  if (p->key.buf) {
+    p->key.buf->used = 0;
+    p->key.len = 0;
+  }
+  return jp_string(p, &p->key);
+}
+
+int32_t ovt_jp_key_is(ovt_jp *p, const char *name, int64_t n) {
+  return p->key.len == n && memcmp(sdata(&p->key), name, (size_t)n) == 0;
+}
+
+// Moves the key out, as a map key.
+void ovt_jp_take_key(ovt_jp *p, ovt_str *out) {
+  *out = p->key;
+  memset(&p->key, 0, sizeof p->key);
+}
+
+void ovt_jp_missing(ovt_jp *p, const char *name, int64_t n) {
+  char m[200];
+  int k = snprintf(m, sizeof m, "missing \"%.*s\"", (int)(n > 100 ? 100 : n), name);
+  jp_msg(p, m, k);
+}
+
+// After a name that matched none of `choices` (like `"A", "B"`).
+void ovt_jp_bad_name(ovt_jp *p, const char *choices, int64_t n) {
+  jp_msg(p, "expected one of ", 16);
+  ovt_str_append_bytes(&p->msg, choices, n);
+  ovt_str_append_bytes(&p->msg, ", got ", 6);
+  json_str_to(&p->msg, (const unsigned char *)sdata(&p->key), p->key.len > 100 ? 100 : p->key.len);
+}
+
+// A fixed-size array or tuple with the wrong number of elements.
+void ovt_jp_bad_len(ovt_jp *p, int64_t want) {
+  char m[80];
+  int k = snprintf(m, sizeof m, "expected an array of %lld elements", (long long)want);
+  jp_msg(p, m, k);
+}
+
+// An object naming an enum variant with more than one key.
+void ovt_jp_one_key(ovt_jp *p) {
+  jp_msg(p, "expected an object with one key, the variant's name", 51);
+}
+
+int32_t ovt_jp_peek(ovt_jp *p) {
+  jp_ws(p);
+  return p->i < p->n ? p->d[p->i] : -1;
+}
+
+// Skips any value, like an object entry no field wants.
+int32_t ovt_jp_skip(ovt_jp *p) {
+  jp_ws(p);
+  if (p->i >= p->n) return jp_syntax(p, "expected a value");
+  unsigned char c = p->d[p->i];
+  if (c == '"') {
+    ovt_str t = {0};
+    int ok = jp_string(p, &t);
+    ovt_buf_release(t.buf, 1, NULL);
+    return ok;
+  }
+  if (c == '{' || c == '[') {
+    int is_obj = c == '{';
+    if (!jp_open(p, c, is_obj ? "an object" : "an array")) return 0;
+    for (int32_t first = 1;; first = 0) {
+      int32_t r = is_obj ? ovt_jp_key(p, first) : ovt_jp_next(p, first);
+      if (r == 0) return 1;
+      if (r < 0 || !ovt_jp_skip(p)) return 0;
+    }
+  }
+  if (jp_lit(p, "true", 4) || jp_lit(p, "false", 5) || jp_lit(p, "null", 4)) return 1;
+  int integral;
+  int64_t len = jp_number(p, &integral);
+  if (!len) {
+    p->syntax = 1;
+    return 0;
+  }
+  p->i += len;
+  return 1;
+}
+
 // ---- printing ----
 
 void ovt_print(const ovt_str *s, int32_t to_stderr) {
@@ -1101,18 +1643,49 @@ static void after_switch(ovt_worker *w, ovt_task *t) {
 
 static int main_finished(ovt_worker *w) { return w->id == 0 && __atomic_load_n(&main_done, __ATOMIC_ACQUIRE); }
 
+static int spinning; // workers in spin_for_work, changed atomically
+
+static int64_t now_ns(void);
+
+// A hint to the core that this is a spin loop.
+static inline void cpu_pause(void) {
+#if defined(__aarch64__)
+  __asm__ volatile("isb");
+#elif defined(__x86_64__)
+  __asm__ volatile("pause");
+#endif
+}
+
+enum { SPIN_NS = 200000 };
+
+// Before sleeping, a worker keeps looking for work for up to SPIN_NS, since
+// work often turns up soon: the next request on a connection, or a task
+// another worker woke. It pauses with `isb` between looks: `sched_yield`
+// would hand the core to another process for a whole time slice on a busy
+// machine. At most half the busy workers spin at once (at least one), as in
+// Go's scheduler, so an idle program doesn't burn every core.
+static ovt_task *spin_for_work(ovt_worker *w) {
+  int busy = nworkers - __atomic_load_n(&idle_workers, __ATOMIC_SEQ_CST);
+  int limit = busy / 2 > 1 ? busy / 2 : 1;
+  ovt_task *t = NULL;
+  if (__atomic_add_fetch(&spinning, 1, __ATOMIC_SEQ_CST) <= limit) {
+    int64_t until = now_ns() + SPIN_NS;
+    while (!t && !main_finished(w) && now_ns() < until) {
+      for (int k = 0; k < 50; k++) cpu_pause();
+      t = find_work(w);
+    }
+  }
+  __atomic_sub_fetch(&spinning, 1, __ATOMIC_SEQ_CST);
+  return t;
+}
+
 // Runs tasks until there are none left for a while, then sleeps; returns
 // when `main` has finished (only on worker 0).
 static void worker_loop(ovt_worker *w) {
   for (;;) {
     if (main_finished(w)) return;
     ovt_task *t = find_work(w);
-    if (!t) {
-      for (int spin = 0; spin < 100 && !t; spin++) {
-        sched_yield();
-        t = find_work(w);
-      }
-    }
+    if (!t) t = spin_for_work(w);
     if (!t) {
       pthread_mutex_lock(&idle_mu);
       __atomic_add_fetch(&idle_workers, 1, __ATOMIC_SEQ_CST);
@@ -2014,6 +2587,47 @@ int32_t ovt_net_read(ovt_sock *s, ovt_arr *out, ovt_str *err) {
   if (!code && s->rlen > s->rstart) {
     ovt_str_append_bytes(out, s->rbuf + s->rstart, s->rlen - s->rstart);
     s->rstart = s->rlen = 0;
+  }
+  tunlock(&s->rmu);
+  return code;
+}
+
+// Exactly `n` bytes; fails if the stream ends first.
+int32_t ovt_net_read_exactly(ovt_sock *s, int64_t n, ovt_arr *out, ovt_str *err) {
+  out->buf = NULL;
+  out->off = 0;
+  out->len = 0;
+  if (n < 0) {
+    char m[64];
+    int k = snprintf(m, sizeof m, "can't read %lld bytes", (long long)n);
+    str_from(err, m, k);
+    return K_INVALID + 1;
+  }
+  tlock(&s->rmu);
+  int32_t code = 0;
+  for (;;) {
+    int64_t avail = s->rlen - s->rstart, need = n - out->len;
+    int64_t take = avail < need ? avail : need;
+    if (take > 0) {
+      ovt_str_append_bytes(out, s->rbuf + s->rstart, take);
+      s->rstart += take;
+    }
+    if (out->len == n) break;
+    int32_t r = fill(s, err);
+    if (r == 0) {
+      char m[120];
+      int k = snprintf(m, sizeof m, "the connection closed after %lld of %lld bytes", (long long)out->len, (long long)n);
+      str_from(err, m, k);
+      code = K_IO + 1;
+    } else if (r >= 2) {
+      code = r - 2;
+    }
+    if (code) {
+      ovt_buf_release(out->buf, 1, NULL);
+      out->buf = NULL;
+      out->len = 0;
+      break;
+    }
   }
   tunlock(&s->rmu);
   return code;

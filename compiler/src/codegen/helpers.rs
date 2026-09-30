@@ -13,7 +13,8 @@ impl<'p> Gen<'p> {
             Helper::Eq => ("ptr %a, ptr %b", "i1"),
             Helper::Cmp => ("ptr %a, ptr %b", "i32"),
             Helper::Hash => ("ptr %p", "i64"),
-            Helper::Show => ("ptr %p, ptr %sb", "void"),
+            Helper::Show | Helper::JsonEnc => ("ptr %p, ptr %sb", "void"),
+            Helper::JsonDec => ("ptr %jp, ptr %out", "i1"),
         };
         match kind {
             Helper::Dup | Helper::Drop => {
@@ -40,13 +41,23 @@ impl<'p> Gen<'p> {
                 self.gen_show(ty, "%p", "%sb");
                 self.term("ret void");
             }
+            Helper::JsonEnc => {
+                self.gen_json_enc(ty, "%p", "%sb");
+                self.term("ret void");
+            }
+            Helper::JsonDec => {
+                let ok = self.gen_json_dec(ty, "%jp", "%out");
+                if !self.f.terminated {
+                    self.term(&format!("ret i1 {ok}"));
+                }
+            }
         }
         let f = std::mem::take(&mut self.f);
         format!("define internal {ret} {sym}({params}) {{\nentry:\n{}{}}}\n", f.allocas, f.code)
     }
 
     /// Runs `body` only when `cond` holds.
-    fn when(&mut self, cond: &str, body: impl FnOnce(&mut Self)) {
+    pub fn when(&mut self, cond: &str, body: impl FnOnce(&mut Self)) {
         let yes = self.label("yes");
         let done = self.label("done");
         self.term(&format!("br i1 {cond}, label %{yes}, label %{done}"));
@@ -55,7 +66,7 @@ impl<'p> Gen<'p> {
         self.start(&done);
     }
 
-    fn call_helper(&mut self, kind: Helper, ty: &Ty, ptr: &str) {
+    pub fn call_helper(&mut self, kind: Helper, ty: &Ty, ptr: &str) {
         if self.needs_rc(ty) {
             let h = self.helper(kind, ty);
             self.inst(&format!("call void {h}(ptr {ptr})"));
@@ -63,7 +74,7 @@ impl<'p> Gen<'p> {
     }
 
     /// The fields of a struct, tuple or variant: (pointer type, index, boxed, type).
-    fn components(&mut self, ty: &Ty, variant: Option<usize>) -> (String, Vec<(bool, Ty)>) {
+    pub fn components(&mut self, ty: &Ty, variant: Option<usize>) -> (String, Vec<(bool, Ty)>) {
         match (ty, variant) {
             (Ty::Tuple(ts), _) => {
                 let lt = self.lty(ty);
@@ -84,7 +95,7 @@ impl<'p> Gen<'p> {
     }
 
     /// For each variant with fields: runs `each(variant, payload pointer)` in a switch on the tag.
-    fn per_variant(&mut self, ty: &Ty, ptr: &str, mut each: impl FnMut(&mut Self, usize, &str)) {
+    pub fn per_variant(&mut self, ty: &Ty, ptr: &str, mut each: impl FnMut(&mut Self, usize, &str)) {
         let Ty::Adt(id, _) = ty else { unreachable!() };
         let lt = self.lty(ty);
         let tagp = self.gep(&lt, ptr, &[0, 0]);
@@ -441,7 +452,7 @@ impl<'p> Gen<'p> {
         }
     }
 
-    fn box_value_ptr(&mut self, slot: &str) -> String {
+    pub fn box_value_ptr(&mut self, slot: &str) -> String {
         let bx = self.load("ptr", slot);
         let vp = self.tmp();
         self.inst(&format!("{vp} = getelementptr inbounds i8, ptr {}, i64 8", bx.repr));
@@ -460,7 +471,7 @@ impl<'p> Gen<'p> {
     }
 
     /// Runs `body(i)` for i in 0..len.
-    fn each_index(&mut self, len: &str, mut body: impl FnMut(&mut Self, &str)) {
+    pub fn each_index(&mut self, len: &str, mut body: impl FnMut(&mut Self, &str)) {
         let counter = self.alloca("i64");
         self.inst(&format!("store i64 0, ptr {counter}"));
         let head = self.label("loop");
@@ -757,17 +768,17 @@ impl<'p> Gen<'p> {
 
     // ---- showing ----
 
-    fn lit(&mut self, sb: &str, s: &str) {
+    pub fn lit(&mut self, sb: &str, s: &str) {
         let c = self.cstr(s.as_bytes());
         self.inst(&format!("call void @ovt_sb_cstr(ptr {sb}, ptr {c}, i64 {})", s.len()));
     }
 
-    fn show_call(&mut self, ty: &Ty, p: &str, sb: &str) {
+    pub fn show_call(&mut self, ty: &Ty, p: &str, sb: &str) {
         let h = self.helper(Helper::Show, ty);
         self.inst(&format!("call void {h}(ptr {p}, ptr {sb})"));
     }
 
-    fn gen_show(&mut self, ty: &Ty, p: &str, sb: &str) {
+    pub fn gen_show(&mut self, ty: &Ty, p: &str, sb: &str) {
         match ty {
             Ty::Int(k) => {
                 let lt = self.lty(ty);

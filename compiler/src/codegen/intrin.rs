@@ -60,7 +60,7 @@ impl<'p> Gen<'p> {
     pub fn intrinsic_body(&mut self, f: FnId, params: &[V]) {
         let key = self.intrinsic_key(f);
         let fspan = self.p.fns[f].span;
-        if self.handle_intrinsic(f, &key, params, fspan) {
+        if self.handle_intrinsic(f, &key, params, fspan) || self.json_intrinsic(&key, params) {
             return;
         }
         let elem = self.f.targs.first().cloned().unwrap_or(Ty::Error);

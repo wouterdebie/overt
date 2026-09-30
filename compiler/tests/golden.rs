@@ -6,7 +6,8 @@
 //! - `tests/programs/<name>` builds and must pass `tasks/*-<name>/tests/run.py`.
 //! - `tests/errors/x.ovt` must fail to build with exactly the messages in `x.err`.
 //! - Every test program, and every `ovt` code block in SPEC.md, must come back
-//!   unchanged from `ovt fmt`.
+//!   unchanged from `ovt fmt`, and the program at the top of SPEC.md must pass
+//!   its tests.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -144,6 +145,20 @@ fn spec_code_blocks_are_canonical() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
+/// The complete program at the top of SPEC.md builds and passes its test.
+#[test]
+fn spec_program_passes_its_tests() {
+    let spec = read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../SPEC.md"));
+    let start = spec.find("```ovt\n// src/main.ovt").expect("SPEC.md starts with a complete program") + 7;
+    let end = start + spec[start..].find("```").unwrap();
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("spec_program");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/main.ovt"), &spec[start..end]).unwrap();
+    let out = ovt().current_dir(&dir).arg("test").output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && stdout.contains("tests passed"), "\n{stdout}{}", String::from_utf8_lossy(&out.stderr));
+}
+
 /// Tokens by `o200k_base`, a proxy for Claude's tokenizer, through `uvx` and
 /// tiktoken; without them, an estimate from the length that errs high.
 fn tokens(text: &str) -> (usize, &'static str) {
@@ -192,7 +207,7 @@ fn docs_fit_their_budgets() {
 fn reference_programs_pass_task_tests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
-    for (name, task) in [("wordfreq", "01-wordfreq"), ("jsonfmt", "01-jsonfmt"), ("hashdir", "02-hashdir"), ("echo", "03-echo"), ("chat", "03-chat")] {
+    for (name, task) in [("wordfreq", "01-wordfreq"), ("jsonfmt", "01-jsonfmt"), ("hashdir", "02-hashdir"), ("echo", "03-echo"), ("chat", "03-chat"), ("todo", "04-todo")] {
         let dir = root.join("tests/programs").join(name);
         let bin = dir.join("bin").join(name);
         let out = ovt().current_dir(&dir).args(["build", "-o"]).arg(&bin).output().unwrap();

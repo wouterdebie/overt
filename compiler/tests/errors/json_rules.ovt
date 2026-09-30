@@ -1,0 +1,20 @@
+type Hits { by_id: Map[int, str] }
+type Holder { s: Shared[int] }
+type Timed { d: Dur }
+type Callback { f: fn() -> int }
+
+fn show[T](v: T) -> str {
+  return json.encode(v)
+}
+
+fn show_json[T: Json](v: T) -> str {
+  return json.encode(v)
+}
+
+fn main() ! io, fail {
+  print(json.encode(Hits(by_id: {})))
+  print(json.encode(Holder(s: Shared.new(1))))
+  print(show_json(Timed(d: 1s)))
+  print(json.encode(Callback(f: || 1)))
+  print(show_json([1]))
+}

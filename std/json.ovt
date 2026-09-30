@@ -1,0 +1,18 @@
+// JSON for every type whose fields have it: numbers, `bool`, `str`, arrays,
+// `Map[str, V]`, `Set[T]`, tuples, optionals, structs and enums.
+//
+// - A struct is an object with its fields as keys; `none` is `null`.
+// - A variant without fields is its name, `"Circle"`; one with fields is an
+//   object with one key, `{"Rect": {"w": 1.0, "h": 2.0}}`.
+// - Decoding ignores keys no field has. A field that's missing or `null`
+//   takes its default, or `none` for an optional; otherwise it's an error.
+
+// The value as compact JSON.
+fn encode[T: Json](v: T) -> str
+  ex json.encode([1, 2]) == "[1,2]"
+
+// Reads a `T` from JSON. Fails with `.Invalid`, saying what's wrong and
+// where, like `items[2].name: expected a string, got a number`.
+fn decode[T: Json](s: str) -> T ! fail
+  ex json.decode[[int]]("[1, 2]")? == [1, 2]
+  ex json.decode[int]("\"one\"") fails .Invalid

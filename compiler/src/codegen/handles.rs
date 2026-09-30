@@ -161,6 +161,16 @@ impl<'p> Gen<'p> {
                 let v = self.load("%ovt.arr", &out);
                 self.emit_return(Some(v));
             }
+            "Conn.read_exactly" => {
+                let env = self.handle_env(&params[0]);
+                let out = self.alloca("%ovt.arr");
+                let err = self.alloca("%ovt.arr");
+                let code = self.tmp();
+                self.inst(&format!("{code} = call i32 @ovt_net_read_exactly(ptr {env}, {}, ptr {out}, ptr {err})", params[1].op()));
+                self.fail_on_code(&code, &err);
+                let v = self.load("%ovt.arr", &out);
+                self.emit_return(Some(v));
+            }
             "Conn.write" | "Conn.write_bytes" => {
                 let env = self.handle_env(&params[0]);
                 let d = self.spill(&params[1]);

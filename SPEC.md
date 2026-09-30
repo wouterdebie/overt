@@ -13,7 +13,7 @@ type HitCount { key: str, hits: int }
 
 fn main() ! io, fail {
   let store = Shared.new(Store(hits: {}))
-  http.serve(":8080", |req| route(req, store))?
+  http.serve(":8080", |req| route(req, store)?)?
 }
 
 // POST /hit/<key> adds a hit; GET /hit/<key> reads the count.
@@ -115,7 +115,7 @@ fn parse(line: str) -> Entry ! fail
 ```
 
 - The signature is the whole contract: parameters, return type, and effects after `!`. Without `->` a function returns nothing. Types are inferred only inside bodies.
-- Return values with `return`. `if`, `match`, `else`, `catch` and `lock` blocks used as values yield their last line.
+- Return values with `return`. `if`, `match`, `else`, `catch` and `lock` blocks used as values yield their last line; if one branch is `none`, the value is optional.
 - `pre cond` traps on entry if false. `ex` lines are examples that `ovt test` runs: `ex <bool expr>`, `ex <call> fails`, `ex <call> fails .Kind`. They can't use `io`. A failure fails the example; inner calls that can fail need `?`.
 - Parameters may have defaults: `fn get(url: str, retries: int = 3)`.
 - Named arguments: inside the parentheses, when two or more arguments go to parameters of the same type, name all but the first of them; literals needn't be named: `copy(a, dst: b)`, `rotr(x, 7)`. Any argument may be named. Named arguments come after positional ones, in any order.
@@ -130,7 +130,7 @@ fn Stack[T].push(inout self, v: T) { self.items.push(v) }
 fn Stack[T].top(self) -> ?T { return self.items.last() }
 ```
 
-- Generics: `fn max[T: Ord](a: T, b: T) -> T`. The constraints are `Eq`, `Ord` and `Hash`. Explicit type arguments: `json.decode[User](body)`. There are no user-defined interfaces; use enums or structs of functions.
+- Generics: `fn max[T: Ord](a: T, b: T) -> T`. The constraints are `Eq`, `Ord`, `Hash` and `Json`. Explicit type arguments: `json.decode[User](body)`. There are no user-defined interfaces; use enums or structs of functions.
 
 ## Values and mutation
 
@@ -250,7 +250,7 @@ drop Db { unsafe { _ = sqlite3_close(self.raw) } }
 
 - Always in scope: `print(x) ! io`, `eprint(x) ! io` (to stderr), `dbg`, `assert`, `trap`, `todo`, `fail`, `Err`, `ErrKind`, `Map`, `Set`, `Shared`, `Atomic`, `Chan`.
 - Modules: `math fs os time net http json log task ffi`. For methods of built-in types, run `ovt outline str`, `ovt outline array` or `ovt outline Map`.
-- `http.serve(addr, handler)` turns a handler's failure into a status: `.Invalid` 400, `.Denied` 403, `.NotFound` 404, `.Conflict` 409, `.Unavailable` 503, `.Timeout` 504, anything else 500.
+- `http.serve(addr, handler)` turns a handler's failure into a status, with the body `{"error": msg}`: `.Invalid` 400, `.Denied` 403, `.NotFound` 404, `.Conflict` 409, `.Unavailable` 503, `.Timeout` 504, anything else 500.
 
 ## Tests
 

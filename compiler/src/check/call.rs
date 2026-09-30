@@ -66,6 +66,9 @@ impl<'a> Checker<'a> {
                     if b.hash {
                         self.require_bound(cx, &v, "Hash", span);
                     }
+                    if b.json {
+                        self.require_bound(cx, &v, "Json", span);
+                    }
                     targs[g.index as usize] = v;
                 }
                 GenericKind::Effect => eargs[g.index as usize] = cx.infer.fresh_eff(),
@@ -88,6 +91,9 @@ impl<'a> Checker<'a> {
                 }
                 if b.hash {
                     self.require_bound(cx, &v, "Hash", span);
+                }
+                if b.json {
+                    self.require_bound(cx, &v, "Json", span);
                 }
                 out.push(v);
             }
@@ -307,6 +313,40 @@ impl<'a> Checker<'a> {
         Some((adt, targs))
     }
 
+    /// The function `e` names, if it's a function name or `module.name`.
+    fn fn_named(&mut self, cx: &mut FnCx, e: &Expr) -> Option<FnId> {
+        match &e.kind {
+            ExprKind::Ident(n) => match self.resolve_name(cx, n) {
+                Named::Fn(f) => Some(f),
+                _ => None,
+            },
+            ExprKind::Field(b, n) => {
+                let m = self.module_of(cx, b)?;
+                if n.name.starts_with('_') && m != self.files[cx.file].module {
+                    return None;
+                }
+                self.modules.get(&m).and_then(|s| s.fns.get(&n.name)).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// Types written in brackets, like `[User]` in `json.decode[User](s)`.
+    fn explicit_types(&mut self, cx: &mut FnCx, args: &[Expr]) -> Vec<Ty> {
+        args.iter()
+            .map(|a| match expr_as_type(a) {
+                Some(t) => {
+                    let g = cx.generics.clone();
+                    self.resolve_type(&t, cx.file, &g)
+                }
+                None => {
+                    self.err(cx.file, a.span, "expected a type here");
+                    Ty::Error
+                }
+            })
+            .collect()
+    }
+
     pub fn call_expr(&mut self, cx: &mut FnCx, callee: &Expr, args: &[Arg], span: Span, want: Option<&Ty>) -> TExpr {
         let file = cx.file;
         match &callee.kind {
@@ -350,13 +390,26 @@ impl<'a> Checker<'a> {
             },
             ExprKind::Variant(name) => self.variant_value(cx, None, name, Some(args), span, want),
             ExprKind::Field(base, name) => self.path_call(cx, base, name, args, span, want),
-            ExprKind::Index { .. } => match self.type_expr_of(cx, callee) {
-                Some((adt, targs)) => self.construct(cx, adt, targs, args, span, want),
-                None => {
-                    let c = self.expr(cx, callee, None);
-                    self.call_value(cx, c, args, span)
+            ExprKind::Index { base, args: targs } => {
+                if let Some((adt, targs)) = self.type_expr_of(cx, callee) {
+                    return self.construct(cx, adt, targs, args, span, want);
                 }
-            },
+                // A generic function with explicit type arguments: `json.decode[User](s)`.
+                if let Some(f) = self.fn_named(cx, base) {
+                    let n = self.fns[f].generics.iter().filter(|g| matches!(g.kind, GenericKind::Type(_))).count();
+                    if targs.len() != n {
+                        let def = &self.fns[f];
+                        let other = !self.files[def.file].open && def.module != self.files[file].module;
+                        let fname = if other { format!("{}.{}", def.module, def.name) } else { def.name.clone() };
+                        let what = if n == 1 { "1 type argument".to_string() } else { format!("{n} type arguments") };
+                        self.err(file, callee.span, format!("`{fname}` takes {what}, not {}", targs.len()));
+                    }
+                    let tys = self.explicit_types(cx, targs);
+                    return self.call_fn(cx, f, None, args, span, want, Some(tys));
+                }
+                let c = self.expr(cx, callee, None);
+                self.call_value(cx, c, args, span)
+            }
             _ => {
                 let c = self.expr(cx, callee, None);
                 self.call_value(cx, c, args, span)

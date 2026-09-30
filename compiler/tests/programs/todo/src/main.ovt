@@ -1,0 +1,139 @@
+// todo <port>: an HTTP JSON API that keeps a list of todos in memory.
+
+type Todo { id: int, title: str, done: bool }
+
+type Store { todos: Map[int, Todo], next: int }
+
+// The body of a POST; the title is checked separately, so it may be missing.
+type NewTodo { title: ?str, done: ?bool }
+
+// The body of a PATCH: the fields to change.
+type Change { title: ?str, done: ?bool }
+
+fn main() ! io, fail {
+  let args = os.args()
+  if args.len() != 1 {
+    fail(.Invalid, "usage: todo <port>")
+  }
+  let port = int.parse(args[0]) else fail(.Invalid, "the port must be a number")
+  if port < 1 || port > 65535 {
+    fail(.Invalid, "the port must be from 1 to 65535")
+  }
+  let store = Shared.new(Store(todos: {}, next: 1))
+  http.serve("127.0.0.1:${port}", |req| route(req, store)?)?
+}
+
+fn route(req: http.Req, store: Shared[Store]) -> http.Resp ! fail {
+  let parts = req.path_parts()
+  if parts == ["todos"] {
+    return match req.method {
+      "GET" => http.json(200, list(store, done_filter(req.query)?))
+      "POST" => http.json(201, create(store, json.decode[NewTodo](req.body)?)?)
+      _ => not_allowed()
+    }
+  }
+  if parts.len() == 2 && parts[0] == "todos" {
+    // Ids that aren't positive integers name no todo.
+    let id = int.parse(parts[1]) else 0
+    return match req.method {
+      "GET" => http.json(200, get(store, id)?)
+      "PATCH" => http.json(200, change(store, id, body: req.body)?)
+      "DELETE" => {
+        delete(store, id)?
+        http.empty(204)
+      }
+      _ => not_allowed()
+    }
+  }
+  fail(.NotFound, "no such path")
+}
+
+type Problem { error: str }
+
+fn not_allowed() -> http.Resp {
+  return http.json(405, Problem(error: "method not allowed"))
+}
+
+// `none` for all todos, or whether to list the done ones.
+fn done_filter(query: str) -> ?bool ! fail
+  ex done_filter("")? == none
+  ex done_filter("done=true")? == true
+  ex done_filter("done=yes") fails .Invalid
+{
+  return match query {
+    "" => none
+    "done=true" => true
+    "done=false" => false
+    _ => fail(.Invalid, "the query must be done=true or done=false")
+  }
+}
+
+// A title without its leading and trailing spaces, if it has 1 to 200 characters.
+fn valid_title(title: str) -> str ! fail
+  ex valid_title("  milk ")? == "milk"
+  ex valid_title("   ") fails .Invalid
+{
+  var start = 0
+  var end = title.len()
+  while start < end && title[start] == ' ' {
+    start += 1
+  }
+  while end > start && title[end - 1] == ' ' {
+    end -= 1
+  }
+  let t = title[start..end]
+  let n = t.runes().len()
+  if n < 1 || n > 200 {
+    fail(.Invalid, "the title must have 1 to 200 characters")
+  }
+  return t
+}
+
+fn list(store: Shared[Store], done: ?bool) -> [Todo] {
+  return lock store as s {
+    var out: [Todo] = []
+    for _id, t in s.todos {
+      if done == none || done == t.done {
+        out.push(t)
+      }
+    }
+    out
+  }
+}
+
+fn create(store: Shared[Store], n: NewTodo) -> Todo ! fail {
+  let title = valid_title(n.title else fail(.Invalid, "the title is missing"))?
+  return lock store as s {
+    let t = Todo(id: s.next, title, done: n.done else false)
+    s.todos[t.id] = t
+    s.next += 1
+    t
+  }
+}
+
+fn get(store: Shared[Store], id: int) -> Todo ! fail {
+  let t = lock store as s { s.todos.get(id) }
+  return t else fail(.NotFound, "no todo ${id}")
+}
+
+fn change(store: Shared[Store], id: int, body: str) -> Todo ! fail {
+  let c = json.decode[Change](body)?
+  let title = if let t = c.title { valid_title(t)? } else { none }
+  let updated = lock store as s {
+    if let old = s.todos.get(id) {
+      let t = Todo(id, title: title else old.title, done: c.done else old.done)
+      s.todos[id] = t
+      t
+    } else {
+      none
+    }
+  }
+  return updated else fail(.NotFound, "no todo ${id}")
+}
+
+fn delete(store: Shared[Store], id: int) ! fail {
+  let gone = lock store as s { s.todos.remove(id) }
+  if gone == none {
+    fail(.NotFound, "no todo ${id}")
+  }
+}

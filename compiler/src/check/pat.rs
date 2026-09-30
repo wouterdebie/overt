@@ -14,7 +14,8 @@ impl<'a> Checker<'a> {
         let file = cx.file;
         let s = self.expr(cx, scrutinee, None);
         let sty = s.ty.clone();
-        let result = if value { Some(want.cloned().unwrap_or_else(|| cx.infer.fresh(VarKind::Any))) } else { None };
+        let some_none = arms.iter().any(|a| super::body::ends_in_none(&a.body));
+        let result = if value { Some(want.cloned().unwrap_or_else(|| super::body::branch_result(cx, some_none))) } else { None };
         let mut tarms = Vec::new();
         let mut all_never = !arms.is_empty();
         for arm in arms {

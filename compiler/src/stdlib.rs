@@ -24,6 +24,8 @@ pub const FILES: &[StdFile] = &[
     StdFile { name: "task", module: Some("task"), text: include_str!("../../std/task.ovt") },
     StdFile { name: "net", module: Some("net"), text: include_str!("../../std/net.ovt") },
     StdFile { name: "time", module: Some("time"), text: include_str!("../../std/time.ovt") },
+    StdFile { name: "json", module: Some("json"), text: include_str!("../../std/json.ovt") },
+    StdFile { name: "http", module: Some("http"), text: include_str!("../../std/http.ovt") },
 ];
 
 /// Module names reserved by the standard library, including ones planned for
@@ -31,11 +33,8 @@ pub const FILES: &[StdFile] = &[
 pub const MODULE_NAMES: &[&str] = &["math", "fs", "os", "time", "net", "http", "json", "log", "task", "ffi"];
 
 /// The milestone that brings a module that isn't implemented yet.
-pub fn planned_milestone(module: &str) -> &'static str {
-    match module {
-        "http" | "json" => "4",
-        _ => "5",
-    }
+pub fn planned_milestone(_module: &str) -> &'static str {
+    "5"
 }
 
 /// The std file that `ovt outline <name>` shows.

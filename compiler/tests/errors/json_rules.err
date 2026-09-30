@@ -1,0 +1,5 @@
+json_rules.ovt:7:10: error: `T` can't be turned into JSON (add the constraint: `T: Json`)
+json_rules.ovt:15:9: error: `Hits` can't be turned into JSON (JSON object keys are strings, so only `Map[str, V]` has a JSON form)
+json_rules.ovt:16:9: error: `Holder` can't be turned into JSON (`Shared` is a handle to shared state)
+json_rules.ovt:17:9: error: `Timed` can't be turned into JSON (a `Dur` has no JSON form)
+json_rules.ovt:18:9: error: `Callback` can't be turned into JSON (it's a function)

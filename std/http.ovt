@@ -1,0 +1,390 @@
+// HTTP/1.1 servers. `serve` handles each connection in a task of its own;
+// connections stay open between requests, and pipelined requests get their
+// responses in order.
+
+// A request: `method` like "GET", `path` like "/todos/3" (without the query),
+// `query` after the "?" (or ""), headers with lowercase names, and the body.
+type Req {
+  method: str
+  path: str
+  query: str
+  headers: Map[str, str]
+  body: str
+}
+
+// A response. `serve` adds `content-length` and `connection`.
+type Resp {
+  status: int
+  headers: Map[str, str] = {}
+  body: str = ""
+}
+
+// Listens on `addr`, like "127.0.0.1:8080" or ":8080", and calls `handler`
+// for every request. A failure becomes a response with the body
+// `{"error": msg}` and a status for its kind: `.Invalid` 400, `.Denied` 403,
+// `.NotFound` 404, `.Conflict` 409, `.Unavailable` 503, `.Timeout` 504, and
+// anything else 500 (logged). Fails if it can't listen; otherwise runs forever.
+fn serve(addr: str, handler: fn(Req) -> Resp ! io, fail) ! io, fail {
+  let listener = net.listen(addr)?
+  task.group(|g| {
+    while true {
+      let conn = listener.accept() catch e {
+        // Out of file descriptors, say: wait for connections to close.
+        log.error("can't accept a connection: ${e.msg}")
+        time.sleep(50ms)
+        continue
+      }
+      g.spawn(|| _connection(conn, handler))
+    }
+  })
+}
+
+// A response with `v` as JSON.
+fn json[T: Json](status: int, v: T) -> Resp {
+  return Resp(status, headers: {"content-type": "application/json"}, body: json.encode(v))
+}
+
+// A plain-text response.
+fn text(status: int, body: str) -> Resp {
+  return Resp(status, headers: {"content-type": "text/plain; charset=utf-8"}, body)
+}
+
+// A response without a body, like `http.empty(204)`.
+fn empty(status: int) -> Resp {
+  return Resp(status)
+}
+
+// The parts of the path between slashes, percent-decoded.
+fn Req.path_parts(self) -> [str]
+  ex Req(method: "GET", path: "/todos/3/", query: "", headers: {}, body: "").path_parts() == ["todos", "3"]
+  ex Req(method: "GET", path: "/", query: "", headers: {}, body: "").path_parts() == []
+{
+  var parts: [str] = []
+  for p in self.path.split("/") {
+    if !p.is_empty() {
+      parts.push(_unescape(p, plus: false))
+    }
+  }
+  return parts
+}
+
+// A header's value; `name` is in any case.
+fn Req.header(self, name: str) -> ?str {
+  return self.headers.get(name.to_lower())
+}
+
+// A query parameter's value, percent-decoded, like "true" for "done" in
+// "done=true&limit=5".
+fn Req.param(self, name: str) -> ?str
+  ex Req(method: "GET", path: "/", query: "a=1&b=x+y%21", headers: {}, body: "").param("b") == "x y!"
+  ex Req(method: "GET", path: "/", query: "a=1", headers: {}, body: "").param("c") == none
+{
+  for pair in self.query.split("&") {
+    let eq = pair.find("=") else pair.len()
+    if _unescape(pair[..eq], plus: true) == name {
+      return if eq < pair.len() { _unescape(pair[eq + 1..], plus: true) } else { "" }
+    }
+  }
+  return none
+}
+
+// The most a request's line and headers, and its body, may take.
+const _MAX_HEAD: int = 64 * 1024
+const _MAX_BODY: int = 16 * 1024 * 1024
+
+// A connection that sends nothing for this long is closed.
+const _IDLE: Dur = 60s
+
+fn _connection(conn: net.Conn, handler: fn(Req) -> Resp ! io, fail) ! io {
+  conn.set_timeout(_IDLE)
+  _requests(conn, handler) catch e {}
+  conn.close()
+}
+
+// What the head of a request says about its connection.
+type _Head { req: Req, keep: bool, http10: bool }
+
+// Why a request can't be handled: the status to reply with.
+type _Bad { status: int, msg: str }
+
+// Handles requests until the connection closes or a request asks for that.
+fn _requests(conn: net.Conn, handler: fn(Req) -> Resp ! io, fail) ! io, fail {
+  while true {
+    var line = conn.read_line()? else return
+    // Empty lines between requests are allowed.
+    while line.is_empty() {
+      line = conn.read_line()? else return
+    }
+    var bad = _Bad(status: 0, msg: "")
+    var head = _read_head(conn, line, inout bad)?
+    if bad.status == 0 {
+      head.req.body = _read_body(conn, head.req, inout bad)?
+    }
+    if bad.status != 0 {
+      _write(conn, _error(bad.status, bad.msg), keep: false, http10: false, head: false)?
+      return
+    }
+    let resp = handler(head.req) catch e {
+      _failure(head.req, e)
+    }
+    _write(conn, resp, keep: head.keep, http10: head.http10, head: head.req.method == "HEAD")?
+    if !head.keep {
+      return
+    }
+  }
+}
+
+// The request line and headers. Problems go in `bad`.
+fn _read_head(conn: net.Conn, line: str, bad: inout _Bad) -> _Head ! io, fail {
+  var req = Req(method: "", path: "", query: "", headers: {}, body: "")
+  let none_head = _Head(req, keep: false, http10: false)
+  let parts = line.split(" ")
+  if parts.len() != 3 || parts[0].is_empty() || !parts[1].starts_with("/") || !parts[2].starts_with("HTTP/1.") {
+    bad = _Bad(status: 400, msg: "a request starts with a line like \"GET /path HTTP/1.1\"")
+    return none_head
+  }
+  if line.len() > 8192 {
+    bad = _Bad(status: 414, msg: "the request line is too long")
+    return none_head
+  }
+  req.method = parts[0]
+  let target = parts[1]
+  if let q = target.find("?") {
+    req.path = target[..q]
+    req.query = target[q + 1..]
+  } else {
+    req.path = target
+  }
+  let http10 = parts[2] == "HTTP/1.0"
+  var size = line.len()
+  while true {
+    let h = conn.read_line()? else fail(.Io, "the connection closed in the middle of a request")
+    if h.is_empty() {
+      break
+    }
+    size += h.len()
+    if size > _MAX_HEAD {
+      bad = _Bad(status: 431, msg: "the headers are too big")
+      return none_head
+    }
+    let colon = h.find(":") else {
+      bad = _Bad(status: 400, msg: "a header line has no ':'")
+      return none_head
+    }
+    let name = h[..colon].to_lower()
+    if name.is_empty() || name.contains(" ") || name.contains("\t") || h[0].is_space() {
+      bad = _Bad(status: 400, msg: "a header name can't be empty or contain spaces")
+      return none_head
+    }
+    let value = h[colon + 1..].trim()
+    if let old = req.headers.get(name) {
+      req.headers[name] = old + ", " + value
+    } else {
+      req.headers[name] = value
+    }
+  }
+  let tokens = (req.headers.get("connection") else "").to_lower()
+  let keep = if http10 { tokens.contains("keep-alive") } else { !tokens.contains("close") }
+  return _Head(req, keep, http10)
+}
+
+// The body, as `content-length` or chunked `transfer-encoding` says. Problems go in `bad`.
+fn _read_body(conn: net.Conn, req: Req, bad: inout _Bad) -> str ! io, fail {
+  let chunked = (req.headers.get("transfer-encoding") else "").to_lower().contains("chunked")
+  let length = req.headers.get("content-length")
+  if !chunked && length == none {
+    return ""
+  }
+  var n = 0
+  if let l = length {
+    n = int.parse(l) else -1
+    if n < 0 || l.contains(",") || l.starts_with("-") {
+      bad = _Bad(status: 400, msg: "content-length isn't a number")
+      return ""
+    }
+    if n > _MAX_BODY {
+      bad = _Bad(status: 413, msg: "the body is bigger than 16 MiB")
+      return ""
+    }
+  }
+  if (req.headers.get("expect") else "").to_lower() == "100-continue" {
+    conn.write("HTTP/1.1 100 Continue\r\n\r\n")?
+  }
+  var data: [u8] = []
+  if chunked {
+    while true {
+      let size_line = conn.read_line()? else fail(.Io, "the connection closed in the middle of a request")
+      let size = _hex((size_line.split(";")[0]).trim()) else -1
+      if size < 0 || data.len() + size > _MAX_BODY {
+        bad = _Bad(status: if size < 0 { 400 } else { 413 }, msg: "a chunk's size is wrong")
+        return ""
+      }
+      if size == 0 {
+        // Trailers, which are ignored.
+        while let t = conn.read_line()? {
+          if t.is_empty() {
+            break
+          }
+        }
+        break
+      }
+      data.extend(conn.read_exactly(size)?)
+      _ = conn.read_line()?
+    }
+  } else if n > 0 {
+    data = conn.read_exactly(n)?
+  }
+  return str.from_bytes(data) catch e {
+    bad = _Bad(status: 400, msg: "the body isn't valid UTF-8")
+    ""
+  }
+}
+
+// A hexadecimal number, or `none`.
+fn _hex(s: str) -> ?int
+  ex _hex("1aF") == 431
+  ex _hex("") == none
+  ex _hex("x") == none
+{
+  if s.is_empty() || s.len() > 15 {
+    return none
+  }
+  var n = 0
+  for i in 0..s.len() {
+    n = n * 16 + (_hex_digit(s[i]) else return none)
+  }
+  return n
+}
+
+fn _hex_digit(c: u8) -> ?int {
+  let l = c.to_lower()
+  if l.is_digit() {
+    return int(l - '0')
+  }
+  if l >= 'a' && l <= 'f' {
+    return int(l - 'a') + 10
+  }
+  return none
+}
+
+// `%XX` escapes decoded, and `+` as a space if `plus`. Text that doesn't
+// decode to UTF-8 stays as it is.
+fn _unescape(s: str, plus: bool) -> str
+  ex _unescape("a%20b+c", plus: true) == "a b c"
+  ex _unescape("100%", plus: false) == "100%"
+{
+  if !s.contains("%") && !(plus && s.contains("+")) {
+    return s
+  }
+  var out: [u8] = []
+  var i = 0
+  while i < s.len() {
+    let c = s[i]
+    if c == '%' && i + 2 < s.len() {
+      if let hi = _hex_digit(s[i + 1]) {
+        if let lo = _hex_digit(s[i + 2]) {
+          out.push(u8(hi * 16 + lo))
+          i += 3
+          continue
+        }
+      }
+    }
+    out.push(if plus && c == '+' { ' ' } else { c })
+    i += 1
+  }
+  return str.from_bytes(out) else s
+}
+
+type _ErrBody { error: str }
+
+fn _error(status: int, msg: str) -> Resp {
+  return json(status, _ErrBody(error: msg))
+}
+
+// The response for a handler's failure.
+fn _failure(req: Req, e: Err) -> Resp ! io {
+  let status = match e.kind {
+    .Invalid => 400
+    .Denied => 403
+    .NotFound => 404
+    .Conflict => 409
+    .Unavailable => 503
+    .Timeout => 504
+    _ => 500
+  }
+  if status == 500 {
+    log.error("${req.method} ${req.path}: ${e.msg}")
+  }
+  return _error(status, e.msg)
+}
+
+// A header with a line break in it would end the headers early.
+fn _bad_headers(resp: Resp) -> bool {
+  for k, v in resp.headers {
+    if k.contains("\n") || k.contains("\r") || v.contains("\n") || v.contains("\r") {
+      return true
+    }
+  }
+  return false
+}
+
+// Sends `resp`; `head` leaves out the body, for a HEAD request.
+fn _write(conn: net.Conn, resp: Resp, keep: bool, http10: bool, head: bool) ! io, fail {
+  let bad = _bad_headers(resp)
+  if bad {
+    log.error("a response header has a line break in it")
+  }
+  let r = if bad { _error(500, "the response had a bad header") } else { resp }
+  var out = "HTTP/1.1 ${r.status} ${_reason(r.status)}\r\n"
+  for k, v in r.headers {
+    out += k
+    out += ": "
+    out += v
+    out += "\r\n"
+  }
+  let no_body = r.status < 200 || r.status == 204 || r.status == 304
+  if !no_body {
+    out += "content-length: ${r.body.len()}\r\n"
+  }
+  if !keep {
+    out += "connection: close\r\n"
+  } else if http10 {
+    out += "connection: keep-alive\r\n"
+  }
+  out += "\r\n"
+  if !no_body && !head {
+    out += r.body
+  }
+  conn.write(out)?
+}
+
+fn _reason(status: int) -> str {
+  return match status {
+    100 => "Continue"
+    200 => "OK"
+    201 => "Created"
+    202 => "Accepted"
+    204 => "No Content"
+    301 => "Moved Permanently"
+    302 => "Found"
+    304 => "Not Modified"
+    400 => "Bad Request"
+    401 => "Unauthorized"
+    403 => "Forbidden"
+    404 => "Not Found"
+    405 => "Method Not Allowed"
+    409 => "Conflict"
+    413 => "Content Too Large"
+    414 => "URI Too Long"
+    415 => "Unsupported Media Type"
+    422 => "Unprocessable Content"
+    429 => "Too Many Requests"
+    431 => "Request Header Fields Too Large"
+    500 => "Internal Server Error"
+    501 => "Not Implemented"
+    502 => "Bad Gateway"
+    503 => "Service Unavailable"
+    504 => "Gateway Timeout"
+    _ => "Status"
+  }
+}

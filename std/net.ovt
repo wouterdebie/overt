@@ -34,6 +34,9 @@ fn Conn.read_line_bytes(self) -> ?[u8] ! io, fail
 // side has closed the connection.
 fn Conn.read(self) -> [u8] ! io, fail
 
+// Exactly `n` bytes. Fails with `.Io` if the connection closes first.
+fn Conn.read_exactly(self, n: int) -> [u8] ! io, fail
+
 // Sends all of `data`, waiting while the other side is slow to read.
 fn Conn.write(self, data: str) ! io, fail
 

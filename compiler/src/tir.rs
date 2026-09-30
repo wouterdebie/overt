@@ -16,6 +16,7 @@ pub struct Bounds {
     pub eq: bool,
     pub ord: bool,
     pub hash: bool,
+    pub json: bool,
 }
 
 #[derive(Clone, Debug)]

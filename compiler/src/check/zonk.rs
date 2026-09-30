@@ -49,11 +49,12 @@ impl<'a> Checker<'a> {
             if let Some(why) = self.lacks(&ty, ob.bound, &cx.generics) {
                 let shown = self.ty_name_with(&ty, &names);
                 let what = match ob.bound {
-                    "Eq" => "compared with `==`",
-                    "Ord" => "ordered with `<` or sorted",
-                    _ => "hashed, so it can't be a map key or set element",
+                    "Eq" => "be compared with `==`",
+                    "Ord" => "be ordered with `<` or sorted",
+                    "Json" => "be turned into JSON",
+                    _ => "be hashed, so it can't be a map key or set element",
                 };
-                let msg = format!("`{shown}` can't be {what}{why}");
+                let msg = format!("`{shown}` can't {what}{why}");
                 self.err(cx.file, ob.span, msg);
             }
         }
@@ -72,6 +73,8 @@ impl<'a> Checker<'a> {
         let all = |ts: &[Ty], seen: &mut HashSet<Ty>| ts.iter().find_map(|t| self.lacks_in(t, bound, generics, seen));
         match ty {
             Ty::Error | Ty::Never | Ty::Var(_) => None,
+            Ty::Dur if bound == "Json" => Some(" (a `Dur` has no JSON form)".into()),
+            Ty::Unit if bound == "Json" => Some(" (`()` has no JSON form)".into()),
             Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Str | Ty::Dur | Ty::Unit => None,
             Ty::Param(i) => {
                 let g = generics.iter().find(|g| matches!(g.kind, GenericKind::Type(_)) && g.index == *i)?;
@@ -79,6 +82,7 @@ impl<'a> Checker<'a> {
                 let has = match bound {
                     "Eq" => b.eq,
                     "Ord" => b.ord,
+                    "Json" => b.json,
                     _ => b.hash,
                 };
                 (!has).then(|| format!(" (add the constraint: `{}: {bound}`)", g.name))
@@ -93,6 +97,14 @@ impl<'a> Checker<'a> {
                 }
                 if (*id == self.known.map || *id == self.known.set) && bound == "Hash" {
                     return Some(String::new());
+                }
+                if bound == "Json" {
+                    if *id == self.known.map && targs[0] != Ty::Str {
+                        return Some(" (JSON object keys are strings, so only `Map[str, V]` has a JSON form)".into());
+                    }
+                    if adt.fields().iter().any(|f| f.name == "_cell") {
+                        return Some(format!(" (`{}` is a handle to shared state)", adt.name));
+                    }
                 }
                 let tys: Vec<Ty> = match &adt.kind {
                     AdtKind::Struct(fs) => fs.iter().map(|f| f.ty.subst(targs, &[])).collect(),

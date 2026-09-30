@@ -1760,8 +1760,10 @@ impl<'a> Checker<'a> {
 
     fn if_expr(&mut self, cx: &mut FnCx, cond: &Cond, then: &ast::Block, els: Option<&Expr>, span: Span, want: Option<&Ty>, value: bool) -> TExpr {
         let file = cx.file;
-        // In a value position the branches must agree on a type.
-        let result = if value { Some(want.cloned().unwrap_or_else(|| cx.infer.fresh(VarKind::Any))) } else { None };
+        // In a value position the branches must agree on a type; with one
+        // branch `none`, it's an optional.
+        let some_none = block_ends_in_none(then) || els.is_some_and(ends_in_none);
+        let result = if value { Some(want.cloned().unwrap_or_else(|| branch_result(cx, some_none))) } else { None };
         let (then_b, then_ty, local, cond_t) = match cond {
             Cond::Expr(c) => {
                 let c = self.expr(cx, c, Some(&Ty::Bool));
@@ -2098,4 +2100,26 @@ fn defaults_for_display(infer: &Infer, t: &Ty) -> Ty {
         Ty::Adt(id, ts) => Ty::Adt(*id, ts.iter().map(|t| defaults_for_display(infer, t)).collect()),
         other => other.clone(),
     }
+}
+
+/// Whether the value of `e` is written as `none`, like the `else` of
+/// `if let t = x { f(t) } else { none }`.
+pub fn ends_in_none(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::None => true,
+        ExprKind::Paren(x) => ends_in_none(x),
+        ExprKind::Block(b) => block_ends_in_none(b),
+        _ => false,
+    }
+}
+
+pub fn block_ends_in_none(b: &ast::Block) -> bool {
+    matches!(b.stmts.last(), Some(ast::Stmt { kind: ast::StmtKind::Expr(e), .. }) if ends_in_none(e))
+}
+
+/// The type of branches that must agree, when nothing says what it is: an
+/// optional if one of them is `none`.
+pub fn branch_result(cx: &mut FnCx, some_none: bool) -> Ty {
+    let v = cx.infer.fresh(VarKind::Any);
+    if some_none { Ty::opt(v) } else { v }
 }

@@ -1,0 +1,2 @@
+type_args.ovt:4:11: error: `json.decode` takes 1 type argument, not 2
+type_args.ovt:5:23: error: expected a type here

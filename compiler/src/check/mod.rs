@@ -134,6 +134,7 @@ pub fn check(files: &[SourceFile], tests: TestSel) -> Result<Program, Vec<Diag>>
     c.resolve_types(&adt_items);
     let pending = c.collect_fns();
     c.find_known_fns();
+    c.check_field_defaults(&adt_items);
     for i in 0..c.consts.len() {
         c.const_value(i);
     }
@@ -305,7 +306,8 @@ impl<'a> Checker<'a> {
                                 b.eq = true;
                             }
                             "Hash" => b.hash = true,
-                            other => self.err(file, bound.span, format!("unknown constraint `{other}`; the constraints are `Eq`, `Ord` and `Hash`")),
+                            "Json" => b.json = true,
+                            other => self.err(file, bound.span, format!("unknown constraint `{other}`; the constraints are `Eq`, `Ord`, `Hash` and `Json`")),
                         }
                     }
                     if out.iter().any(|o| o.name == name.name) {
@@ -351,7 +353,11 @@ impl<'a> Checker<'a> {
             }
         }
         self.mark_boxed();
-        // Field defaults are checked like constants, once all types are known.
+    }
+
+    /// Field defaults are checked like constants, once all types and
+    /// functions are known: a default like `{}` calls `Map.new`.
+    fn check_field_defaults(&mut self, items: &[(AdtId, &'a ast::Item, FileId)]) {
         for &(id, item, fi) in items {
             if let ItemKind::Type(t) = &item.kind {
                 if let TypeBody::Struct { fields, .. } = &t.body {
@@ -802,6 +808,7 @@ impl<'a> Checker<'a> {
                 b.eq |= tb.eq;
                 b.ord |= tb.ord;
                 b.hash |= tb.hash;
+                b.json |= tb.json;
             }
         }
         let args = (0..want as u32).map(Ty::Param).collect();

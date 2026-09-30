@@ -1,0 +1,82 @@
+// json.encode and json.decode on every kind of type, and decoding errors.
+
+type Todo { id: int, title: str, done: bool = false }
+type Change { title: ?str, done: ?bool }
+enum Shape {
+  Circle(r: f64)
+  Rect(w: f64, h: f64)
+  Empty
+}
+enum Color {
+  Red
+  Green
+}
+type Tree { name: str, kids: [Tree] }
+type Mix { x: u8, tags: Set[str], m: Map[str, [int]], pair: (int, str), c: Color, f: f32 }
+type Page[T] { items: [T], next: ?str }
+// A field defaulting to an empty map.
+type Resp { status: int, headers: Map[str, str] = {} }
+
+fn main() ! io, fail {
+  print(json.encode(Todo(id: 1, title: "say \"hi\"\n\u{1} ü", done: true)))
+  print(json.encode(Change(title: none, done: true)))
+  print(json.encode([Shape.Circle(r: 1.5), .Rect(w: 1.0, h: 2.0), .Empty]))
+  print(json.encode(Tree(name: "a", kids: [Tree(name: "b", kids: [])])))
+  print(json.encode(Mix(x: 7, tags: {"a", "b"}, m: {"k": [1, 2]}, pair: (3, "x"), c: .Green, f: 0.5)))
+  print(json.encode(Page(items: [1, 2], next: "p2")))
+  print(json.encode([1.0 / 0.0, 0.1, -2.0]))
+  print(json.encode(Resp(status: 204)))
+  print(json.decode[Todo]("""{"id": 5, "title": "é🙂\n", "extra": [1, {"a": null}]}""")?)
+  print(json.decode[Change]("""{"done": false, "title": null}""")?)
+  print(json.decode[[Shape]]("""[{"Circle": {"r": 2}}, "Empty", {"Rect": {"h": 1, "w": 3.5e1}}]""")?)
+  print(json.decode[Tree]("""{"name": "r", "kids": [{"name": "k", "kids": []}]}""")?)
+  print(json.decode[Mix]("""{"x": 255, "tags": ["q", "q"], "m": {"a": [1], "b": []}, "pair": [9, "z"], "c": "Red", "f": 1}""")?)
+  print(json.decode[Page[str]]("""{"items": ["a"]}""")?)
+  print(json.decode[Resp]("""{"status": 200}""")?)
+  let round = Mix(x: 1, tags: {"t"}, m: {}, pair: (0, ""), c: .Red, f: -1.25)
+  assert(json.decode[Mix](json.encode(round))? == round)
+  for bad in [
+    "{",
+    "[1, 2]",
+    """{"id": "1", "title": "x"}""",
+    """{"id": 1}""",
+    """{"id": 1.5, "title": "x"}""",
+    """{"id": 1, "title": "x"} x""",
+    """{"id": 99999999999999999999, "title": "x"}""",
+    """{"id": 1, "title": "\ud800"}""",
+    """{"id": 1, "title": "x",}""",
+    """{'id': 1}""",
+    "",
+  ] {
+    decode_todo(bad)
+  }
+  for bad in [
+    """{"x": 256, "tags": [], "m": {}, "pair": [1, "a"], "c": "Red", "f": 0}""",
+    """{"x": 1, "tags": [1], "m": {}, "pair": [1, "a"], "c": "Red", "f": 0}""",
+    """{"x": 1, "tags": [], "m": {"k": [1, "a"]}, "pair": [1, "a"], "c": "Red", "f": 0}""",
+    """{"x": 1, "tags": [], "m": {}, "pair": [1], "c": "Red", "f": 0}""",
+    """{"x": 1, "tags": [], "m": {}, "pair": [1, "a", 2], "c": "Red", "f": 0}""",
+    """{"x": 1, "tags": [], "m": {}, "pair": [1, "a"], "c": "Blue", "f": 0}""",
+  ] {
+    let m = json.decode[Mix](bad) catch e {
+      print("error: ${e.msg}")
+      continue
+    }
+    print("decoded ${m}")
+  }
+  for bad in ["""[{"Circle": {}}]""", """[{"Circle": {"r": 1}, "Rect": {}}]""", """["Circle"]""", "[3]", """[{"Square": {}}]"""] {
+    let s = json.decode[[Shape]](bad) catch e {
+      print("error: ${e.msg}")
+      continue
+    }
+    print("decoded ${s}")
+  }
+}
+
+fn decode_todo(s: str) ! io {
+  let t = json.decode[Todo](s) catch e {
+    print("error: ${e.msg}")
+    return
+  }
+  print("decoded ${t}")
+}
